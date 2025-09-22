@@ -1,0 +1,11 @@
+pandas>=2.2
+numpy>=1.26
+requests>=2.31
+ccxt>=4.3
+yfinance>=0.2
+feedparser>=6.0
+vaderSentiment>=3.3
+scikit-learn>=1.5
+joblib>=1.3
+python-dateutil>=2.9
+ics>=0.7
