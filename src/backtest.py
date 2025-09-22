@@ -65,14 +65,30 @@ def event_backtest(
         if abs(new_target - target) > 1e-9:
             trade_cost = abs(new_target - target) * cost
             equity[-1] *= (1.0 - trade_cost)
-            trades.append({"i": i, "price": price, "delta": new_target - target, "equity": equity[-1]})
+
+            old_target = target
             target = new_target
             last_trade_i = i
             entry_i = i if target > 0.0 else -10**9
 
-        # Fiyat hareketi
-        ret = (price / (price_prev + 1e-12)) - 1.0
-        equity.append(equity[-1] * (1.0 + target * ret))
+            # --- ZAMAN ve AKSİYON ---
+            tstamp = df.index[i]  # pandas.Timestamp
+            if target == 0.0 and old_target > 0.0:
+                action = "EXIT"
+            elif old_target <= 0.0 and target > 0.0:
+                action = "ENTER"
+            else:
+                action = "REBALANCE"
+
+            trades.append({
+                "i": i,
+                "time": str(tstamp),
+                "action": action,
+                "price": float(price),
+                "old_target": float(old_target),
+                "new_target": float(target),
+                "equity": float(equity[-1]),
+            })
 
     out = df.copy().iloc[: len(equity)]
     out["equity"] = equity
