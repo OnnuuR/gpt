@@ -50,46 +50,107 @@ def download_all(cfg, logger):
         fng.to_csv(os.path.join(cfg["general"]["data_dir"], "fng.csv"))
         logger.info(f"Saved fng.csv ({len(fng)} rows)")
 
-def build_dataset(cfg, logger):
-    # BTC OHLCV
-    base = pd.read_csv(os.path.join(cfg["general"]["data_dir"], "btc_ohlcv.csv"), index_col=0)
+import os
+import pandas as pd
+from typing import Dict, Any
+
+def build_dataset(cfg: Dict[str, Any], logger) -> pd.DataFrame:
+    """
+    Tüm kaynakları 1 saatlik banda indirip kesişim (inner join) ile tamamen
+    eş-zamanlı (synchronous) bir veri seti oluşturur; ardından özellikleri üretir.
+    """
+    data_dir = cfg["general"]["data_dir"]
+    tf = cfg.get("market", {}).get("timeframe", "1h").lower()
+    if tf != "1h":
+        raise ValueError("Bu senkron sürüm şu an '1h' için tasarlandı.")
+
+    lookback_days = int(cfg.get("market", {}).get("lookback_days", 120))  # 3-4 ay önerildi
+    use_sentiment = bool(cfg.get("sync", {}).get("use_sentiment", False)) # eş-zamanlılık için kapalı
+
+    # --- 1) BTC (zorunlu) ---
+    logger.info("Ana BTC OHLCV verisi yükleniyor...")
+    base_path = os.path.join(data_dir, "btc_ohlcv.csv")
+    base = pd.read_csv(base_path, index_col=0)
     base.index = pd.to_datetime(base.index, utc=True, errors="coerce")
-    base = base[["open", "high", "low", "close", "volume"]]
+    base = base[["open", "high", "low", "close", "volume"]].sort_index()
 
-    # Optional inputs
-    qqq_path = os.path.join(cfg["general"]["data_dir"], "qqq.csv")
-    dxy_path = os.path.join(cfg["general"]["data_dir"], "dxy.csv")
-    sent_path = os.path.join(cfg["general"]["data_dir"], "sentiment.csv")
-    fng_path = os.path.join(cfg["general"]["data_dir"], "fng.csv")
+    # Pencereyi son N güne indir
+    end = base.index.max()
+    start = end - pd.Timedelta(days=lookback_days)
+    base = base.loc[(base.index >= start) & (base.index <= end)]
 
-    qqq = pd.read_csv(qqq_path, index_col=0) if os.path.exists(qqq_path) else pd.DataFrame()
+    # BTC zaten 1h; yinede garanti olsun:
+    base = base.resample("1h").last()
+
+    # Küçük yardımcı
+    def _read_csv(name, cols):
+        path = os.path.join(data_dir, name)
+        if not os.path.exists(path):
+            return pd.DataFrame()
+        df = pd.read_csv(path, index_col=0)
+        df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
+        df = df.sort_index()
+        if cols:
+            df = df[cols]
+        return df
+
+    # --- 2) Opsiyonel kaynaklar (1h’e resample + pencere kırp) ---
+    qqq = _read_csv("qqq.csv", ["qqq_close"])
     if not qqq.empty:
-        qqq.index = pd.to_datetime(qqq.index, utc=True, errors="coerce")
+        qqq = qqq.loc[(qqq.index >= start) & (qqq.index <= end)]
+        qqq = qqq.resample("1h").last()  # doldurma yok
+        logger.info("-> Başarıyla yüklendi ve 1h'e indirildi: QQQ")
 
-    dxy = pd.read_csv(dxy_path, index_col=0) if os.path.exists(dxy_path) else pd.DataFrame()
+    dxy = _read_csv("dxy.csv", ["dxy_close"])
     if not dxy.empty:
-        dxy.index = pd.to_datetime(dxy.index, utc=True, errors="coerce")
+        dxy = dxy.loc[(dxy.index >= start) & (dxy.index <= end)]
+        dxy = dxy.resample("1h").last()
+        logger.info("-> Başarıyla yüklendi ve 1h'e indirildi: DXY")
 
-    sent = pd.read_csv(sent_path, index_col=0) if os.path.exists(sent_path) else pd.DataFrame()
-    if not sent.empty:
-        sent.index = pd.to_datetime(sent.index, utc=True, errors="coerce")
-
-    fng = pd.read_csv(fng_path, index_col=0) if os.path.exists(fng_path) else pd.DataFrame()
+    fng = _read_csv("fng.csv", ["fng"])
     if not fng.empty:
-        fng.index = pd.to_datetime(fng.index, utc=True, errors="coerce")
+        fng = fng.loc[(fng.index >= start) & (fng.index <= end)]
+        fng = fng.resample("1h").ffill()  # günlük → 1h (ileri taşıma doğal)
+        logger.info("-> Başarıyla yüklendi ve 1h'e indirildi: FNG")
 
+    sent = pd.DataFrame()
+    if use_sentiment:
+        sent_raw = _read_csv("sentiment.csv", ["sentiment"])
+        if not sent_raw.empty:
+            sent = sent_raw.loc[(sent_raw.index >= start) & (sent_raw.index <= end)]
+            sent = sent.resample("1h").mean()  # yayma yok; yoksa NaN kalsın
+            logger.info("-> Başarıyla yüklendi ve 1h'e indirildi: SENTIMENT (aktif)")
+    else:
+        logger.info("SENTIMENT devre dışı (sync.use_sentiment=false).")
+
+    # --- 3) Sıkı EŞ-ZAMANLILIK: INNER JOIN (kesişim) ---
+    # Sadece aynı saat damgasında hepsi varsa tutulur.
     merged = base.copy()
-    if not qqq.empty:
-        merged = merged.join(qqq[["qqq_close"]], how="left")
-    if not dxy.empty:
-        merged = merged.join(dxy[["dxy_close"]], how="left")
-    if not sent.empty:
-        merged = merged.join(sent[["sentiment"]], how="left")
-    if not fng.empty:
-        merged = merged.join(fng[["fng"]].resample("1h").ffill(), how="left")
+    for df in [qqq, dxy, fng]:
+        if not df.empty:
+            merged = merged.join(df, how="inner")  # kesişim
+    if use_sentiment and not sent.empty:
+        merged = merged.join(sent, how="inner")
 
-    merged = merged.ffill().bfill().infer_objects(copy=False)
+    # Sayısala dönüştür (korelasyon/ATR için kritik)
+    for col in ["open", "high", "low", "close", "volume", "qqq_close", "dxy_close", "fng", "sentiment"]:
+        if col in merged.columns:
+            merged[col] = pd.to_numeric(merged[col], errors="coerce")
 
+    # ÖZET (yüklenen & kesişim)
+    logger.info("--- Veri Yükleme Özeti ---")
+    def _span(df, name):
+        if df.empty: return
+        logger.info(f"[{name}] Zaman aralığı: {df.index.min()} -> {df.index.max()} | Satır sayısı: {len(df)}")
+    _span(base, "BTC")
+    _span(qqq, "QQQ")
+    _span(dxy, "DXY")
+    if use_sentiment: _span(sent, "SENTIMENT")
+    _span(fng, "FNG")
+    logger.info(f"[SYNC] Kesişim satır sayısı: {len(merged)} (1h)")
+
+    # --- 4) Çekirdek özellikler ---
+    logger.info("Çekirdek özellikler (feature) hesaplanıyor...")
     feats = add_core_features(
         merged,
         rsi_period=cfg["features"]["rsi_period"],
@@ -98,13 +159,22 @@ def build_dataset(cfg, logger):
         corr_window=cfg["features"]["corr_window"],
         qqq_col="qqq_close",
     )
+
+    # Rolling ısınma dönemlerinden doğan NaN'ları at (ör. corr_window, SMA)
+    drop_cols = ["sma_fast", "sma_slow", "atr", "atr_pct"]
+    if "qqq_close" in feats.columns:
+        drop_cols += ["corr_qqq", "qqq_trend_up"]
+    feats = feats.dropna(subset=[c for c in drop_cols if c in feats.columns])
+
     return feats
 
 def run_backtest(cfg, logger):
     feats = build_dataset(cfg, logger)
     # optional ML
     model_path = os.path.join(cfg["general"]["models_dir"], "btc_gb.joblib")
-    model = load(model_path) if (cfg["ml"]["enable"] and os.path.exists(model_path)) else None
+    ml_cfg = cfg.get("ml", {})
+    model = load(model_path) if (ml_cfg.get("enable", False) and os.path.exists(model_path)) else None
+
 
     rows = []
     # macro gating
@@ -133,6 +203,22 @@ def run_backtest(cfg, logger):
 
     sigdf = pd.DataFrame(rows).set_index("time")
 
+    # --- Hızlı sağlık kontrolü ---
+    try:
+        sigdf = sigdf.sort_index()
+        cmin, cmax = float(sigdf["close"].min()), float(sigdf["close"].max())
+        npos = int((sigdf["signal"] == 1).sum())
+        nneg = int((sigdf["signal"] == -1).sum())
+        print(f"[CHECK] close min/max: {cmin:.2f} / {cmax:.2f} | signals +1:{npos}  -1:{nneg}")
+        if abs(cmax - cmin) < 1e-6:
+            print("[WARN] close min==max → fiyat oynaksız görünüyor (yanlış format/parse?)")
+    except Exception as e:
+        print(f"[CHECK] Sağlık kontrolü atlandı: {e}")
+
+    sigdf["close"] = pd.to_numeric(sigdf["close"], errors="coerce").ffill().bfill()
+
+
+
     # Olay odaklı backtest
     out, stats, trades = event_backtest(
         sigdf,
@@ -146,17 +232,6 @@ def run_backtest(cfg, logger):
 
     print("Backtest stats:", stats)
 
-    # --- Hızlı sağlık kontrolü ---
-    try:
-        sigdf = sigdf.sort_index()
-        cmin, cmax = float(sigdf["close"].min()), float(sigdf["close"].max())
-        npos = int((sigdf["signal"] == 1).sum())
-        nneg = int((sigdf["signal"] == -1).sum())
-        print(f"[CHECK] close min/max: {cmin:.2f} / {cmax:.2f} | signals +1:{npos}  -1:{nneg}")
-        if abs(cmax - cmin) < 1e-6:
-            print("[WARN] close min==max → fiyat oynaksız görünüyor (yanlış format/parse?)")
-    except Exception as e:
-        print(f"[CHECK] Sağlık kontrolü atlandı: {e}")
 
 
     # --- İNSANİ ÖZET ---
@@ -229,11 +304,22 @@ def main():
     ap.add_argument("--config", default="./config/settings.yaml")
     args = ap.parse_args()
     cfg = load_cfg(args.config)
-    logger = get_logger(level=cfg["general"]["log_level"])
+    logger = get_logger(level=cfg.get("general", {}).get("log_level", "INFO"))
 
+    # Varsayılanları güvenle doldur
+    cfg.setdefault("general", {})
+    cfg["general"].setdefault("data_dir", "./data")
+    cfg["general"].setdefault("models_dir", "./models")
+    cfg["general"].setdefault("state_dir", "./state")
+    cfg["general"].setdefault("log_level", "INFO")
+    cfg.setdefault("ml", {})
+    cfg["ml"].setdefault("enable", False)
+
+    # Dizinleri oluştur
     os.makedirs(cfg["general"]["data_dir"], exist_ok=True)
-    os.makedirs(cfg["general"]["state_dir"], exist_ok=True)
     os.makedirs(cfg["general"]["models_dir"], exist_ok=True)
+    os.makedirs(cfg["general"]["state_dir"], exist_ok=True)
+
 
     if args.cmd == "download":
         download_all(cfg, logger)
