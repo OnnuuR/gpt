@@ -56,119 +56,100 @@ from typing import Dict, Any
 
 def build_dataset(cfg: Dict[str, Any], logger) -> pd.DataFrame:
     """
-    Ana BTC veri setini yükler, opsiyonel setleri toleranslı/sınırlı doldurma ile
-    senkronize eder, özellikleri hesaplar ve nihai DataFrame'i döndürür.
+    Tüm kaynakları 1 saatlik banda indirip kesişim (inner join) ile tamamen
+    eş-zamanlı (synchronous) bir veri seti oluşturur; ardından özellikleri üretir.
     """
-    # --- 1) BTC OHLCV (zorunlu) ---
+    data_dir = cfg["general"]["data_dir"]
+    tf = cfg.get("market", {}).get("timeframe", "1h").lower()
+    if tf != "1h":
+        raise ValueError("Bu senkron sürüm şu an '1h' için tasarlandı.")
+
+    lookback_days = int(cfg.get("market", {}).get("lookback_days", 120))  # 3-4 ay önerildi
+    use_sentiment = bool(cfg.get("sync", {}).get("use_sentiment", False)) # eş-zamanlılık için kapalı
+
+    # --- 1) BTC (zorunlu) ---
     logger.info("Ana BTC OHLCV verisi yükleniyor...")
-    base_path = os.path.join(cfg["general"]["data_dir"], "btc_ohlcv.csv")
-    try:
-        base = pd.read_csv(base_path, index_col=0)
-        base.index = pd.to_datetime(base.index, utc=True, errors="coerce")
-        base = base[["open", "high", "low", "close", "volume"]].sort_index()
-    except FileNotFoundError:
-        logger.error(f"Ana veri seti bulunamadı: {base_path}")
-        raise
+    base_path = os.path.join(data_dir, "btc_ohlcv.csv")
+    base = pd.read_csv(base_path, index_col=0)
+    base.index = pd.to_datetime(base.index, utc=True, errors="coerce")
+    base = base[["open", "high", "low", "close", "volume"]].sort_index()
+
+    # Pencereyi son N güne indir
+    end = base.index.max()
+    start = end - pd.Timedelta(days=lookback_days)
+    base = base.loc[(base.index >= start) & (base.index <= end)]
+
+    # BTC zaten 1h; yinede garanti olsun:
+    base = base.resample("1h").last()
 
     # Küçük yardımcı
-    def _read_csv(path: str) -> pd.DataFrame:
-        if os.path.exists(path):
-            df = pd.read_csv(path, index_col=0)
-            df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
-            return df.sort_index()
-        return pd.DataFrame()
+    def _read_csv(name, cols):
+        path = os.path.join(data_dir, name)
+        if not os.path.exists(path):
+            return pd.DataFrame()
+        df = pd.read_csv(path, index_col=0)
+        df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
+        df = df.sort_index()
+        if cols:
+            df = df[cols]
+        return df
 
-    # --- 2) Opsiyonel setleri oku ---
-    data_dir = cfg["general"]["data_dir"]
-    qqq = _read_csv(os.path.join(data_dir, "qqq.csv"))           # beklenen sütun: qqq_close
-    dxy = _read_csv(os.path.join(data_dir, "dxy.csv"))           # beklenen sütun: dxy_close
-    sent = _read_csv(os.path.join(data_dir, "sentiment.csv"))    # beklenen sütun: sentiment
-    fng  = _read_csv(os.path.join(data_dir, "fng.csv"))          # beklenen sütun: fng
+    # --- 2) Opsiyonel kaynaklar (1h’e resample + pencere kırp) ---
+    qqq = _read_csv("qqq.csv", ["qqq_close"])
+    if not qqq.empty:
+        qqq = qqq.loc[(qqq.index >= start) & (qqq.index <= end)]
+        qqq = qqq.resample("1h").last()  # doldurma yok
+        logger.info("-> Başarıyla yüklendi ve 1h'e indirildi: QQQ")
 
-    # Tolerans/limitler (varsayılanlar config yoksa çalışır)
-    sync_cfg = cfg.get("sync", {}) if isinstance(cfg.get("sync", {}), dict) else {}
-    qtol_min = int(sync_cfg.get("qqq_tolerance_minutes", 120))
-    dtol_min = int(sync_cfg.get("dxy_tolerance_minutes", 180))
-    sent_ffill_h = int(sync_cfg.get("sentiment_ffill_hours", 6))
-    fng_ffill_h  = int(sync_cfg.get("fng_ffill_hours", 48))
+    dxy = _read_csv("dxy.csv", ["dxy_close"])
+    if not dxy.empty:
+        dxy = dxy.loc[(dxy.index >= start) & (dxy.index <= end)]
+        dxy = dxy.resample("1h").last()
+        logger.info("-> Başarıyla yüklendi ve 1h'e indirildi: DXY")
 
-    # Çalışma penceresi: BTC aralığı
-    start, end = base.index.min(), base.index.max()
+    fng = _read_csv("fng.csv", ["fng"])
+    if not fng.empty:
+        fng = fng.loc[(fng.index >= start) & (fng.index <= end)]
+        fng = fng.resample("1h").ffill()  # günlük → 1h (ileri taşıma doğal)
+        logger.info("-> Başarıyla yüklendi ve 1h'e indirildi: FNG")
+
+    sent = pd.DataFrame()
+    if use_sentiment:
+        sent_raw = _read_csv("sentiment.csv", ["sentiment"])
+        if not sent_raw.empty:
+            sent = sent_raw.loc[(sent_raw.index >= start) & (sent_raw.index <= end)]
+            sent = sent.resample("1h").mean()  # yayma yok; yoksa NaN kalsın
+            logger.info("-> Başarıyla yüklendi ve 1h'e indirildi: SENTIMENT (aktif)")
+    else:
+        logger.info("SENTIMENT devre dışı (sync.use_sentiment=false).")
+
+    # --- 3) Sıkı EŞ-ZAMANLILIK: INNER JOIN (kesişim) ---
+    # Sadece aynı saat damgasında hepsi varsa tutulur.
     merged = base.copy()
+    for df in [qqq, dxy, fng]:
+        if not df.empty:
+            merged = merged.join(df, how="inner")  # kesişim
+    if use_sentiment and not sent.empty:
+        merged = merged.join(sent, how="inner")
 
-    # --- 3) QQQ: toleranslı eşleme (merge_asof, backward) + sınırlı ffill ---
-    if not qqq.empty and "qqq_close" in qqq.columns:
-        qqq_clip = qqq.loc[(qqq.index >= start) & (qqq.index <= end), ["qqq_close"]]
-        merged = pd.merge_asof(
-            merged.sort_index(), qqq_clip.sort_index(),
-            left_index=True, right_index=True,
-            direction="backward",
-            tolerance=pd.Timedelta(minutes=qtol_min)
-        )
-        # Toleransın saat cinsinden sınırlı ileri doldurma (bfill yok!)
-        merged["qqq_close"] = merged["qqq_close"].ffill(limit=max(1, qtol_min // 60))
-        logger.info("-> Başarıyla yüklendi ve birleştirildi: QQQ")
-    else:
-        logger.info("QQQ yok veya 'qqq_close' sütunu bulunamadı, atlanıyor.")
+    # Sayısala dönüştür (korelasyon/ATR için kritik)
+    for col in ["open", "high", "low", "close", "volume", "qqq_close", "dxy_close", "fng", "sentiment"]:
+        if col in merged.columns:
+            merged[col] = pd.to_numeric(merged[col], errors="coerce")
 
-    # --- 4) DXY: toleranslı eşleme + sınırlı ffill ---
-    if not dxy.empty and "dxy_close" in dxy.columns:
-        dxy_clip = dxy.loc[(dxy.index >= start) & (dxy.index <= end), ["dxy_close"]]
-        merged = pd.merge_asof(
-            merged.sort_index(), dxy_clip.sort_index(),
-            left_index=True, right_index=True,
-            direction="backward",
-            tolerance=pd.Timedelta(minutes=dtol_min)
-        )
-        merged["dxy_close"] = merged["dxy_close"].ffill(limit=max(1, dtol_min // 60))
-        logger.info("-> Başarıyla yüklendi ve birleştirildi: DXY")
-    else:
-        logger.info("DXY yok veya 'dxy_close' sütunu bulunamadı, atlanıyor.")
-
-    # --- 5) SENTIMENT: 1H'e indir, sınırlı ffill; bfill YOK ---
-    if not sent.empty and "sentiment" in sent.columns:
-        sent_h = sent[["sentiment"]].resample("1h").mean()
-        sent_h = sent_h.loc[(sent_h.index >= start) & (sent_h.index <= end)]
-        merged = merged.join(sent_h, how="left")
-        merged["sentiment"] = merged["sentiment"].ffill(limit=max(1, sent_ffill_h))
-        logger.info("-> Başarıyla yüklendi ve birleştirildi: SENTIMENT")
-    else:
-        logger.info("SENTIMENT yok veya 'sentiment' sütunu bulunamadı, atlanıyor.")
-
-    # --- 6) FNG: günlük → 1H; yalnızca ffill (bfill yok) ---
-    if not fng.empty and "fng" in fng.columns:
-        fng_h = fng[["fng"]].resample("1h").ffill()
-        fng_h = fng_h.loc[(fng_h.index >= start) & (fng_h.index <= end)]
-        merged = merged.join(fng_h, how="left")
-        # İstersen limitli ffill de uygulanabilir; günlük veri olduğu için gerek yok.
-        logger.info("-> Başarıyla yüklendi ve birleştirildi: FNG")
-    else:
-        logger.info("FNG yok veya 'fng' sütunu bulunamadı, atlanıyor.")
-
-    # --- 7) GLOBAL FILL YOK ---
-    # Sadece 'close' serisini güvene al (NaN kalmasın)
-    merged["close"] = pd.to_numeric(merged["close"], errors="coerce").ffill().bfill()
-
-    # --- 8) Yüklenen veri özetleri ---
+    # ÖZET (yüklenen & kesişim)
     logger.info("--- Veri Yükleme Özeti ---")
-    loaded_data = {
-        "BTC": base,
-        "QQQ": qqq if not qqq.empty else pd.DataFrame(),
-        "DXY": dxy if not dxy.empty else pd.DataFrame(),
-        "SENTIMENT": sent if not sent.empty else pd.DataFrame(),
-        "FNG": fng if not fng.empty else pd.DataFrame(),
-    }
-    for name, df_ in loaded_data.items():
-        if not df_.empty:
-            logger.info(f"[{name}] Zaman aralığı: {df_.index.min()} -> {df_.index.max()} | Satır sayısı: {len(df_)}")
+    def _span(df, name):
+        if df.empty: return
+        logger.info(f"[{name}] Zaman aralığı: {df.index.min()} -> {df.index.max()} | Satır sayısı: {len(df)}")
+    _span(base, "BTC")
+    _span(qqq, "QQQ")
+    _span(dxy, "DXY")
+    if use_sentiment: _span(sent, "SENTIMENT")
+    _span(fng, "FNG")
+    logger.info(f"[SYNC] Kesişim satır sayısı: {len(merged)} (1h)")
 
-    # NaN oranlarını göster (ffill sonrası)
-    nan_rates = merged.isna().mean()
-    nan_msg = ", ".join([f"{c}:{r*100:.1f}%" for c, r in nan_rates.items() if r > 0])
-    if nan_msg:
-        logger.info(f"[SYNC] NaN oranları (ffill sınırlı uygulandı): {nan_msg}")
-
-    # --- 9) Çekirdek özellikler ---
+    # --- 4) Çekirdek özellikler ---
     logger.info("Çekirdek özellikler (feature) hesaplanıyor...")
     feats = add_core_features(
         merged,
@@ -179,7 +160,12 @@ def build_dataset(cfg: Dict[str, Any], logger) -> pd.DataFrame:
         qqq_col="qqq_close",
     )
 
-    # --- 10) Sonuç ---
+    # Rolling ısınma dönemlerinden doğan NaN'ları at (ör. corr_window, SMA)
+    drop_cols = ["sma_fast", "sma_slow", "atr", "atr_pct"]
+    if "qqq_close" in feats.columns:
+        drop_cols += ["corr_qqq", "qqq_trend_up"]
+    feats = feats.dropna(subset=[c for c in drop_cols if c in feats.columns])
+
     return feats
 
 def run_backtest(cfg, logger):
