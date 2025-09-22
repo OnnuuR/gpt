@@ -1,22 +1,7 @@
-\
-import numpy as np
 import pandas as pd
-
-def ema(series, n):
-    return series.ewm(span=n, adjust=False).mean()
-
-def sma(series, n):
-    return series.rolling(n).mean()
-
-def rsi(close, period=14):
-    delta = close.diff()
-    gain = (delta.clip(lower=0)).rolling(period).mean()
-    loss = (-delta.clip(upper=0)).rolling(period).mean()
-    rs = gain / (loss + 1e-12)
-    return 100 - (100 / (1 + rs))
+import numpy as np
 
 def returns(series):
-    # pandas FutureWarning'u için:
     return series.pct_change(fill_method=None)
 
 def rolling_corr(a, b, window=72):
@@ -31,24 +16,34 @@ def atr(high, low, close, n=14):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     return tr.rolling(n).mean()
 
-
 def add_core_features(df, rsi_period=14, sma_fast=20, sma_slow=50, corr_window=72, qqq_col="qqq_close"):
     out = df.copy()
-    out["rsi"] = rsi(out["close"], rsi_period)
-    out["sma_fast"] = sma(out["close"], sma_fast)
-    out["sma_slow"] = sma(out["close"], sma_slow)
-    if qqq_col in out.columns:
-        out["qqq_ema"] = ema(out[qqq_col], 50)
-        out["corr_qqq"] = rolling_corr(out["close"], out[qqq_col], corr_window)
-        out["qqq_trend_up"] = (out[qqq_col] > out["qqq_ema"]).astype(int)
+
+    # Basit RSI
+    delta = out["close"].diff()
+    gain = delta.clip(lower=0).rolling(rsi_period).mean()
+    loss = (-delta.clip(upper=0)).rolling(rsi_period).mean()
+    rs = gain / (loss + 1e-12)
+    out["rsi"] = 100 - (100 / (1 + rs))
+
+    # SMA’lar ve QQQ trend
+    out["sma_fast"] = out["close"].rolling(sma_fast).mean()
+    out["sma_slow"] = out["close"].rolling(sma_slow).mean()
+    out["qqq_trend_up"] = ((out[qqq_col].rolling(3).mean() - out[qqq_col].rolling(10).mean()) > 0).astype(int) if qqq_col in out else 0
+
+    # BTC <-> QQQ korelasyon
+    if qqq_col in out:
+        out["corr_qqq"] = rolling_corr(out["close"], out[qqq_col], window=corr_window)
     else:
-        out["corr_qqq"] = 0.0
-        out["qqq_trend_up"] = 0
-    if "sentiment" in out.columns:
-        out["sentiment_smooth"] = out["sentiment"].rolling(6).mean()
-    if "fng" in out.columns:
-        out["fng_z"] = (out["fng"] - out["fng"].rolling(30).mean()) / (out["fng"].rolling(30).std() + 1e-9)
+        out["corr_qqq"] = np.nan
+
+    # Sentiment smoothing (varsa)
+    if "sentiment" in out:
+        out["sentiment_smooth"] = out["sentiment"].rolling(24, min_periods=1).mean()
+
+    # ATR & ATR yüzdesi
     out["atr"] = atr(out["high"], out["low"], out["close"], n=14)
     out["atr_pct"] = out["atr"] / out["close"]
+
     out["ret1"] = returns(out["close"])
     return out
