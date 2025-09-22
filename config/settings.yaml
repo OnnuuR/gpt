@@ -1,6 +1,8 @@
 general:
   data_dir: "./data"
   models_dir: "./models"
+  log_level: "INFO"   # <— eklendi (DEBUG/INFO/WARNING/ERROR kabul edilir)
+
 
 market:
   timeframe: "1h"

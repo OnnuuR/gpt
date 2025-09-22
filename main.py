@@ -302,7 +302,7 @@ def main():
     ap.add_argument("--config", default="./config/settings.yaml")
     args = ap.parse_args()
     cfg = load_cfg(args.config)
-    logger = get_logger(level=cfg["general"]["log_level"])
+    logger = get_logger(level=cfg.get("general", {}).get("log_level", "INFO"))
 
     os.makedirs(cfg["general"]["data_dir"], exist_ok=True)
     os.makedirs(cfg["general"]["state_dir"], exist_ok=True)
