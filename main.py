@@ -1,4 +1,12 @@
-import os, argparse, yaml
+import os
+import argparse
+import importlib.util
+
+_yaml_spec = importlib.util.find_spec("yaml")
+if _yaml_spec is not None:
+    import yaml  # type: ignore
+else:
+    yaml = None
 import pandas as pd
 import numpy as np
 from dateutil import tz
@@ -15,9 +23,73 @@ from src.macro_calendar import fetch_ics_events, in_risk_window
 
 UTC = tz.gettz("UTC")
 
+def _strip_inline_comment(line: str) -> str:
+    cleaned = []
+    in_quotes = False
+    for ch in line:
+        if ch == '"':
+            in_quotes = not in_quotes
+            cleaned.append(ch)
+        elif ch == "#" and not in_quotes:
+            break
+        else:
+            cleaned.append(ch)
+    return "".join(cleaned).rstrip()
+
+
+def _parse_scalar(value: str):
+    val = value.strip()
+    if val == "":
+        return ""
+    lower = val.lower()
+    if lower == "true":
+        return True
+    if lower == "false":
+        return False
+    if val.startswith('"') and val.endswith('"'):
+        return val[1:-1]
+    try:
+        if "." in val:
+            return float(val)
+        return int(val)
+    except ValueError:
+        return val
+
+
+def _simple_yaml_load(text: str):
+    root = {}
+    stack = [(-1, root)]
+    for raw_line in text.splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        line = _strip_inline_comment(raw_line)
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        key_part = line.strip()
+        if ":" not in key_part:
+            raise ValueError(f"Unsupported line in YAML fallback parser: {raw_line}")
+        key, _, remainder = key_part.partition(":")
+        key = key.strip()
+        remainder = remainder.strip()
+        while stack and indent <= stack[-1][0]:
+            stack.pop()
+        parent = stack[-1][1]
+        if remainder == "":
+            new_dict = {}
+            parent[key] = new_dict
+            stack.append((indent, new_dict))
+        else:
+            parent[key] = _parse_scalar(remainder)
+    return root
+
+
 def load_cfg(path):
     with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        text = f.read()
+    if yaml is not None:
+        return yaml.safe_load(text)
+    return _simple_yaml_load(text)
 
 def download_all(cfg, logger):
     sym = cfg["market"]["symbols"][0]
@@ -201,7 +273,11 @@ def run_backtest(cfg, logger):
         esig, econf = ensemble_with_ml(sig, conf, proba)
         rows.append({"time": t, "close": row["close"], "signal": esig, "confidence": econf})
 
-    sigdf = pd.DataFrame(rows).set_index("time")
+    sigdf = pd.DataFrame(rows)
+    if sigdf.empty:
+        sigdf = pd.DataFrame(columns=["time", "close", "signal", "confidence"]).set_index("time")
+    else:
+        sigdf = sigdf.set_index("time")
 
     # --- Hızlı sağlık kontrolü ---
     try:
@@ -220,17 +296,39 @@ def run_backtest(cfg, logger):
 
 
     # Olay odaklı backtest
-    out, stats, trades = event_backtest(
-        sigdf,
-        fee=cfg["risk"].get("taker_fee", 0.0004),
-        slip=cfg["risk"].get("slippage", 0.0005),
-        max_pos=cfg["risk"].get("max_position_pct", 0.5),
-        min_hold_bars=cfg["risk"].get("min_hold_bars", 6),
-        cooldown_bars=cfg["risk"].get("cooldown_bars", 4),
-        rebalance_threshold=cfg["risk"].get("rebalance_threshold", 0.25),
-    )
+    out = pd.DataFrame()
+    stats = {}
+    trades = []
+    if not sigdf.empty:
+        out, stats, trades = event_backtest(
+            sigdf,
+            fee=cfg["risk"].get("taker_fee", 0.0004),
+            slip=cfg["risk"].get("slippage", 0.0005),
+            max_pos=cfg["risk"].get("max_position_pct", 0.5),
+            min_hold_bars=cfg["risk"].get("min_hold_bars", 6),
+            cooldown_bars=cfg["risk"].get("cooldown_bars", 4),
+            rebalance_threshold=cfg["risk"].get("rebalance_threshold", 0.25),
+        )
 
     print("Backtest stats:", stats)
+
+    no_data = sigdf.empty or (hasattr(out, "empty") and getattr(out, "empty"))
+    if no_data:
+        msg = "Sync/feature filtering yielded no rows; skipping summary output."
+        if logger is not None:
+            logger.warning(msg)
+        else:
+            print(msg)
+
+        out.to_csv(os.path.join(cfg["general"]["data_dir"], "backtest_equity.csv"))
+        try:
+            trades_path = os.path.join(cfg["general"]["data_dir"], "trades.csv")
+            pd.DataFrame(trades).to_csv(trades_path, index=False)
+            print(f"\nKaydedildi: {trades_path}")
+        except Exception:
+            pass
+
+        return stats
 
 
 
@@ -314,6 +412,11 @@ def main():
     cfg["general"].setdefault("log_level", "INFO")
     cfg.setdefault("ml", {})
     cfg["ml"].setdefault("enable", False)
+    cfg.setdefault("macro", {})
+    cfg["macro"].setdefault("use_calendar", False)
+    cfg["macro"].setdefault("ics_links", [])
+    cfg["macro"].setdefault("pre_event_hours", 0)
+    cfg["macro"].setdefault("post_event_minutes", 0)
 
     # Dizinleri oluştur
     os.makedirs(cfg["general"]["data_dir"], exist_ok=True)
