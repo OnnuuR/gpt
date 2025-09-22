@@ -50,46 +50,73 @@ def download_all(cfg, logger):
         fng.to_csv(os.path.join(cfg["general"]["data_dir"], "fng.csv"))
         logger.info(f"Saved fng.csv ({len(fng)} rows)")
 
-def build_dataset(cfg, logger):
-    # BTC OHLCV
-    base = pd.read_csv(os.path.join(cfg["general"]["data_dir"], "btc_ohlcv.csv"), index_col=0)
-    base.index = pd.to_datetime(base.index, utc=True, errors="coerce")
-    base = base[["open", "high", "low", "close", "volume"]]
+import os
+import pandas as pd
+from typing import Dict, Any
 
-    # Optional inputs
-    qqq_path = os.path.join(cfg["general"]["data_dir"], "qqq.csv")
-    dxy_path = os.path.join(cfg["general"]["data_dir"], "dxy.csv")
-    sent_path = os.path.join(cfg["general"]["data_dir"], "sentiment.csv")
-    fng_path = os.path.join(cfg["general"]["data_dir"], "fng.csv")
+def build_dataset(cfg: Dict[str, Any], logger) -> pd.DataFrame:
+    """
+    Ana BTC veri setini yükler, yapılandırmada belirtilen opsiyonel veri 
+    setleriyle birleştirir, özellikleri hesaplar ve sonuç DataFrame'ini döndürür.
 
-    qqq = pd.read_csv(qqq_path, index_col=0) if os.path.exists(qqq_path) else pd.DataFrame()
-    if not qqq.empty:
-        qqq.index = pd.to_datetime(qqq.index, utc=True, errors="coerce")
+    Args:
+        cfg (Dict[str, Any]): Veri yolları ve özellik parametrelerini içeren 
+                               yapılandırma sözlüğü.
+        logger: Bilgilendirme ve hata mesajları için yapılandırılmış logger nesnesi.
 
-    dxy = pd.read_csv(dxy_path, index_col=0) if os.path.exists(dxy_path) else pd.DataFrame()
-    if not dxy.empty:
-        dxy.index = pd.to_datetime(dxy.index, utc=True, errors="coerce")
+    Returns:
+        pd.DataFrame: Tüm verilerin birleştirildiği ve özelliklerin eklendiği 
+                      nihai DataFrame.
+    """
+    # 1. Ana BTC Veri Setini Yükle
+    logger.info("Ana BTC OHLCV verisi yükleniyor...")
+    base_path = os.path.join(cfg["general"]["data_dir"], "btc_ohlcv.csv")
+    try:
+        base = pd.read_csv(base_path, index_col=0)
+        base.index = pd.to_datetime(base.index, utc=True, errors="coerce")
+        base = base[["open", "high", "low", "close", "volume"]]
+    except FileNotFoundError:
+        logger.error(f"Ana veri seti bulunamadı: {base_path}")
+        raise
 
-    sent = pd.read_csv(sent_path, index_col=0) if os.path.exists(sent_path) else pd.DataFrame()
-    if not sent.empty:
-        sent.index = pd.to_datetime(sent.index, utc=True, errors="coerce")
-
-    fng = pd.read_csv(fng_path, index_col=0) if os.path.exists(fng_path) else pd.DataFrame()
-    if not fng.empty:
-        fng.index = pd.to_datetime(fng.index, utc=True, errors="coerce")
-
+    # 2. Opsiyonel Veri Setlerini Yükle ve Birleştir
     merged = base.copy()
-    if not qqq.empty:
-        merged = merged.join(qqq[["qqq_close"]], how="left")
-    if not dxy.empty:
-        merged = merged.join(dxy[["dxy_close"]], how="left")
-    if not sent.empty:
-        merged = merged.join(sent[["sentiment"]], how="left")
-    if not fng.empty:
-        merged = merged.join(fng[["fng"]].resample("1h").ffill(), how="left")
+    loaded_data = {"BTC": base}
 
+    # Tekrarlanan işlemleri önlemek için bir yapı kuralım
+    optional_datasets_config = {
+        "qqq": {"filename": "qqq.csv", "cols": ["qqq_close"]},
+        "dxy": {"filename": "dxy.csv", "cols": ["dxy_close"]},
+        "sentiment": {"filename": "sentiment.csv", "cols": ["sentiment"]},
+        "fng": {"filename": "fng.csv", "cols": ["fng"]},
+    }
+
+    for name, info in optional_datasets_config.items():
+        path = os.path.join(cfg["general"]["data_dir"], info["filename"])
+        if os.path.exists(path):
+            try:
+                df = pd.read_csv(path, index_col=0)
+                df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
+                
+                # FNG için özel işlem (yeniden örnekleme)
+                data_to_join = df[info["cols"]]
+                if name == "fng":
+                    data_to_join = data_to_join.resample("1h").ffill()
+                
+                merged = merged.join(data_to_join, how="left")
+                loaded_data[name.upper()] = df
+                logger.info(f"-> Başarıyla yüklendi ve birleştirildi: {name.upper()}")
+            except Exception as e:
+                logger.warning(f"{name.upper()} verisi yüklenirken hata oluştu, atlanıyor: {e}")
+        else:
+            logger.warning(f"Opsiyonel veri dosyası bulunamadı, atlanıyor: {path}")
+    
+    # 3. Eksik Verileri Doldur
+    logger.info("Birleştirme sonrası eksik veriler dolduruluyor (ffill -> bfill)...")
     merged = merged.ffill().bfill().infer_objects(copy=False)
 
+    # 4. Çekirdek Özellikleri Ekle
+    logger.info("Çekirdek özellikler (feature) hesaplanıyor...")
     feats = add_core_features(
         merged,
         rsi_period=cfg["features"]["rsi_period"],
@@ -98,6 +125,15 @@ def build_dataset(cfg, logger):
         corr_window=cfg["features"]["corr_window"],
         qqq_col="qqq_close",
     )
+
+    # 5. Yüklenen Verilerin Özetini Yazdır
+    logger.info("--- Veri Yükleme Özeti ---")
+    for name, df in loaded_data.items():
+        logger.info(
+            f"[{name}] Zaman aralığı: {df.index.min()} -> {df.index.max()} | Satır sayısı: {len(df)}"
+        )
+    
+    # 6. Sonuç DataFrame'ini Döndür (Döngünün Dışında!)
     return feats
 
 def run_backtest(cfg, logger):
