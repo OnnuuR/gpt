@@ -1,44 +1,85 @@
+# ====== GENERAL ======
 general:
-  data_dir: "./data"
-  models_dir: "./models"
-  state_dir: "./state"   # ← eklendi
-  log_level: "INFO"
+  log_level: INFO
+  data_dir: ./data
+  models_dir: ./models
+  state_dir: ./state
 
-
-
+# ====== MARKET / DATA SOURCES ======
 market:
-  timeframe: "1h"
-  lookback_days: 120   # 3-4 ay
+  symbols: ["BTC/USDT"]   # ana sembol
+  timeframe: "1h"         # sıkı senkron
+  lookback_days: 120      # 3-4 ay+ (strict inner join ile efektif aralık)
+  yfinance:
+    qqq: "QQQ"            # Nasdaq-100 ETF
+    dxy: "DX-Y.NYB"       # DXY (Yahoo sembolü)
 
+# ====== SYNC (STRICT 1H INNER-JOIN) ======
 sync:
-  use_sentiment: false # RSS çok seyrek olduğu için eş-zamanlı seti aşırı daraltmasın
+  use_sentiment: false    # true yaparsan sentiment.csv dahil edilir (1h'e indirgenir)
+  mode: "strict_1h_inner" # tüm seriler 1h’e indirgenir ve ortak kesişim alınır
 
+# ====== FEATURES ======
 features:
   rsi_period: 14
   sma_fast: 20
   sma_slow: 50
-  corr_window: 72
+  corr_window: 36         # QQQ korelasyonu için daha çevik pencere
+  atr_period: 14
 
-ml:
-  enable: false
-  # model_file: "btc_gb.joblib"  # istersen bu adı da kullanırız; şu an main.py sabit isimle bakıyor
-
-
+# ====== RULES (LONG & SHORT) ======
 rules:
-  rsi_buy: 45
-  rsi_sell: 65
-  sentiment_min: 0.0     # sentiment kapalıysa zaten etkisiz
-  atr_min_pct: 0.0010    # eş-zamanlı pencerede yeterli volatilite
-  require_qqq_up: true   # QQQ ile uyuşuk saatleri eleyelim; US seansına odaklanır
-  min_corr_qqq: 0.00     # negatif korelasyon saatlerini ele
+  # Momentum eşikleri (daha seçici)
+  rsi_buy: 55             # long tetik: daha güçlü momentum
+  rsi_sell: 45            # short tetik: daha zayıf momentum
 
+  # Taraf seçim marjı (thrash’i azaltır): long_score - short_score > side_margin ise long seç
+  side_margin: 0.10
+
+  # Güveni kademelendir (küçük oynamalar rebalance tetiklemesin)
+  quantize_levels: [0.0, 0.25, 0.5, 0.75, 1.0]
+  conf_min_on: 0.60       # sinyal on ise min güven tabanı
+
+  # QQQ şartları (opsiyonel)
+  require_qqq_up: false
+  require_qqq_down: false
+
+  # Korelasyon & volatilite
+  min_corr_qqq: -1.0
+  atr_min_pct: 0.0008
+
+  # Çok düşük puanlarda flat kal
+  min_take_conf: 0.15
+
+# ====== RISK / EXECUTION ======
 risk:
-  max_position_pct: 1.0      # tavanı aç
-  position_mode: "scaled"     # istersen "full" yapabilirsin
-  target_floor_pct: 0.30      # scaled modda asgari %30
-  min_hold_bars: 4            # US seans bloklarında daha kısa tutabiliriz
-  cooldown_bars: 3
-  rebalance_threshold: 0.20
-  exit_confirm_bars: 1
+  position_mode: "scaled"     # confidence -> hedef maruziyet
+  target_floor_pct: 0.0       # flat kalabilsin (long/short sinyal yoksa 0)
+  max_position_pct: 1.0
+  rebalance_threshold: 0.25   # hedef/pozisyon farkı %25 altındaysa dokunma -> churn düşer
+  min_hold_bars: 6            # en az 6 bar tut (1h -> ~6 saat)
+  cooldown_bars: 2            # çıkış sonrası 2 bar bekle
+
+  # maliyetler
   taker_fee: 0.0004
   slippage: 0.0005
+
+# ====== SENTIMENT (opsiyonel) ======
+sentiment:
+  rss_feeds:
+    - "https://www.coindesk.com/arc/outboundfeeds/rss/"
+    - "https://cointelegraph.com/rss"
+  rolling_hours: 24
+  threshold_pos: 0.2
+  threshold_neg: -0.2
+
+# ====== ML (opsiyonel) ======
+ml:
+  enable: false
+
+# ====== MACRO CALENDAR (opsiyonel) ======
+macro:
+  use_calendar: false
+  ics_links: []
+  pre_event_hours: 2
+  post_event_minutes: 60

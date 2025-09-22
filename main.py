@@ -4,6 +4,7 @@ import numpy as np
 from dateutil import tz
 from joblib import load
 from datetime import datetime, timezone
+from typing import Dict, Any
 
 from src.utils import get_logger
 from src import data_aggregator as da
@@ -15,9 +16,11 @@ from src.macro_calendar import fetch_ics_events, in_risk_window
 
 UTC = tz.gettz("UTC")
 
-def load_cfg(path):
+
+def load_cfg(path: str):
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
 
 def download_all(cfg, logger):
     sym = cfg["market"]["symbols"][0]
@@ -50,9 +53,6 @@ def download_all(cfg, logger):
         fng.to_csv(os.path.join(cfg["general"]["data_dir"], "fng.csv"))
         logger.info(f"Saved fng.csv ({len(fng)} rows)")
 
-import os
-import pandas as pd
-from typing import Dict, Any
 
 def build_dataset(cfg: Dict[str, Any], logger) -> pd.DataFrame:
     """
@@ -64,8 +64,8 @@ def build_dataset(cfg: Dict[str, Any], logger) -> pd.DataFrame:
     if tf != "1h":
         raise ValueError("Bu senkron sürüm şu an '1h' için tasarlandı.")
 
-    lookback_days = int(cfg.get("market", {}).get("lookback_days", 120))  # 3-4 ay önerildi
-    use_sentiment = bool(cfg.get("sync", {}).get("use_sentiment", False)) # eş-zamanlılık için kapalı
+    lookback_days = int(cfg.get("market", {}).get("lookback_days", 120))
+    use_sentiment = bool(cfg.get("sync", {}).get("use_sentiment", False))
 
     # --- 1) BTC (zorunlu) ---
     logger.info("Ana BTC OHLCV verisi yükleniyor...")
@@ -79,10 +79,10 @@ def build_dataset(cfg: Dict[str, Any], logger) -> pd.DataFrame:
     start = end - pd.Timedelta(days=lookback_days)
     base = base.loc[(base.index >= start) & (base.index <= end)]
 
-    # BTC zaten 1h; yinede garanti olsun:
+    # Saatlik garanti
     base = base.resample("1h").last()
 
-    # Küçük yardımcı
+    # Yardımcı CSV okuyucu
     def _read_csv(name, cols):
         path = os.path.join(data_dir, name)
         if not os.path.exists(path):
@@ -94,50 +94,45 @@ def build_dataset(cfg: Dict[str, Any], logger) -> pd.DataFrame:
             df = df[cols]
         return df
 
-    # --- 2) Opsiyonel kaynaklar (1h’e resample + pencere kırp) ---
+    # --- 2) Opsiyoneller (1h + pencere) ---
     qqq = _read_csv("qqq.csv", ["qqq_close"])
     if not qqq.empty:
-        qqq = qqq.loc[(qqq.index >= start) & (qqq.index <= end)]
-        qqq = qqq.resample("1h").last()  # doldurma yok
+        qqq = qqq.loc[(qqq.index >= start) & (qqq.index <= end)].resample("1h").last()
         logger.info("-> Başarıyla yüklendi ve 1h'e indirildi: QQQ")
 
     dxy = _read_csv("dxy.csv", ["dxy_close"])
     if not dxy.empty:
-        dxy = dxy.loc[(dxy.index >= start) & (dxy.index <= end)]
-        dxy = dxy.resample("1h").last()
+        dxy = dxy.loc[(dxy.index >= start) & (dxy.index <= end)].resample("1h").last()
         logger.info("-> Başarıyla yüklendi ve 1h'e indirildi: DXY")
 
     fng = _read_csv("fng.csv", ["fng"])
     if not fng.empty:
-        fng = fng.loc[(fng.index >= start) & (fng.index <= end)]
-        fng = fng.resample("1h").ffill()  # günlük → 1h (ileri taşıma doğal)
+        fng = fng.loc[(fng.index >= start) & (fng.index <= end)].resample("1h").ffill()
         logger.info("-> Başarıyla yüklendi ve 1h'e indirildi: FNG")
 
     sent = pd.DataFrame()
     if use_sentiment:
         sent_raw = _read_csv("sentiment.csv", ["sentiment"])
         if not sent_raw.empty:
-            sent = sent_raw.loc[(sent_raw.index >= start) & (sent_raw.index <= end)]
-            sent = sent.resample("1h").mean()  # yayma yok; yoksa NaN kalsın
+            sent = sent_raw.loc[(sent_raw.index >= start) & (sent_raw.index <= end)].resample("1h").mean()
             logger.info("-> Başarıyla yüklendi ve 1h'e indirildi: SENTIMENT (aktif)")
     else:
         logger.info("SENTIMENT devre dışı (sync.use_sentiment=false).")
 
-    # --- 3) Sıkı EŞ-ZAMANLILIK: INNER JOIN (kesişim) ---
-    # Sadece aynı saat damgasında hepsi varsa tutulur.
+    # --- 3) INNER JOIN (kesişim) ---
     merged = base.copy()
     for df in [qqq, dxy, fng]:
         if not df.empty:
-            merged = merged.join(df, how="inner")  # kesişim
+            merged = merged.join(df, how="inner")
     if use_sentiment and not sent.empty:
         merged = merged.join(sent, how="inner")
 
-    # Sayısala dönüştür (korelasyon/ATR için kritik)
-    for col in ["open", "high", "low", "close", "volume", "qqq_close", "dxy_close", "fng", "sentiment"]:
+    # Numerik tipler
+    for col in ["open","high","low","close","volume","qqq_close","dxy_close","fng","sentiment"]:
         if col in merged.columns:
             merged[col] = pd.to_numeric(merged[col], errors="coerce")
 
-    # ÖZET (yüklenen & kesişim)
+    # ÖZET
     logger.info("--- Veri Yükleme Özeti ---")
     def _span(df, name):
         if df.empty: return
@@ -149,7 +144,7 @@ def build_dataset(cfg: Dict[str, Any], logger) -> pd.DataFrame:
     _span(fng, "FNG")
     logger.info(f"[SYNC] Kesişim satır sayısı: {len(merged)} (1h)")
 
-    # --- 4) Çekirdek özellikler ---
+    # --- 4) Özellikler ---
     logger.info("Çekirdek özellikler (feature) hesaplanıyor...")
     feats = add_core_features(
         merged,
@@ -160,66 +155,93 @@ def build_dataset(cfg: Dict[str, Any], logger) -> pd.DataFrame:
         qqq_col="qqq_close",
     )
 
-    # Rolling ısınma dönemlerinden doğan NaN'ları at (ör. corr_window, SMA)
-    drop_cols = ["sma_fast", "sma_slow", "atr", "atr_pct"]
-    if "qqq_close" in feats.columns:
-        drop_cols += ["corr_qqq", "qqq_trend_up"]
-    feats = feats.dropna(subset=[c for c in drop_cols if c in feats.columns])
+    # SADECE çekirdek warmup kolonlarını zorunlu tut (aşırı drop'ı engelle)
+    warm_cols = ["sma_fast", "sma_slow", "atr", "atr_pct"]
+    feats = feats.dropna(subset=[c for c in warm_cols if c in feats.columns])
+
+    # close güvence
+    if feats["close"].isna().any():
+        feats["close"] = pd.to_numeric(feats["close"], errors="coerce").ffill().bfill()
 
     return feats
 
+
 def run_backtest(cfg, logger):
     feats = build_dataset(cfg, logger)
-    # optional ML
+
+    # Optional ML
     model_path = os.path.join(cfg["general"]["models_dir"], "btc_gb.joblib")
     ml_cfg = cfg.get("ml", {})
     model = load(model_path) if (ml_cfg.get("enable", False) and os.path.exists(model_path)) else None
 
-
+    # Macro gating
     rows = []
-    # macro gating
+    macro_cfg = cfg.get("macro", {})
     events = None
-    if cfg["macro"]["use_calendar"] and cfg["macro"]["ics_links"]:
-        events = fetch_ics_events(cfg["macro"]["ics_links"])
+    if bool(macro_cfg.get("use_calendar")) and macro_cfg.get("ics_links"):
+        events = fetch_ics_events(macro_cfg.get("ics_links"))
 
     for t, row in feats.iterrows():
-        # macro risk: block new positions around events
         block = False
         if events is not None and not events.empty:
             now_utc = pd.Timestamp(t, tz="UTC").to_pydatetime()
             block, _ = in_risk_window(
-                now_utc, events, cfg["macro"]["pre_event_hours"], cfg["macro"]["post_event_minutes"]
+                now_utc,
+                events,
+                macro_cfg.get("pre_event_hours", 2),
+                macro_cfg.get("post_event_minutes", 60),
             )
+
         sig, conf = rule_signal(row, cfg["rules"])
         if block and sig == 1:
-            sig = 0
-            conf = 0.0
+            sig, conf = 0, 0.0
+
         proba = None
         if model is not None and str(t.minute) in ["0", "15", "30", "45"]:
-            # reduce predict frequency a bit
             proba = predict_proba_row(model, row)
+
         esig, econf = ensemble_with_ml(sig, conf, proba)
         rows.append({"time": t, "close": row["close"], "signal": esig, "confidence": econf})
 
-    sigdf = pd.DataFrame(rows).set_index("time")
+    # Sinyal tablosu
+    sigdf = pd.DataFrame(rows)
+    if "time" in sigdf.columns:
+        sigdf["time"] = pd.to_datetime(sigdf["time"], utc=True, errors="coerce")
+        sigdf = sigdf.set_index("time")
+    else:
+        sigdf.index = feats.index[: len(sigdf)]
+    sigdf = sigdf.sort_index()
 
-    # --- Hızlı sağlık kontrolü ---
+    if "signal" not in sigdf.columns:
+        sigdf["signal"] = 0
+    if "confidence" not in sigdf.columns:
+        sigdf["confidence"] = 0.0
+
+    sigdf["signal"] = pd.to_numeric(sigdf["signal"], errors="coerce").fillna(0).astype(int)
+    sigdf["confidence"] = pd.to_numeric(sigdf["confidence"], errors="coerce").fillna(0.0).clip(0.0, 1.0)
+
+    if "close" not in sigdf.columns:
+        sigdf = sigdf.join(feats[["close"]], how="inner")
+    sigdf["close"] = pd.to_numeric(sigdf["close"], errors="coerce")
+
+    # Eğer tablo boşsa / close tamamen NaN ise güvenle çık
+    if sigdf.empty or sigdf["close"].isna().all():
+        print("[BT] Uyarı: Sinyal tablosu boş veya 'close' tamamen NaN.")
+        print("     (Muhtemel neden: çok sıkı inner-join + warmup drop. lookback_days artırmayı veya kural eşiklerini gevşetmeyi deneyin.)")
+        return
+
+    # Sağlık kontrolü
     try:
-        sigdf = sigdf.sort_index()
         cmin, cmax = float(sigdf["close"].min()), float(sigdf["close"].max())
         npos = int((sigdf["signal"] == 1).sum())
         nneg = int((sigdf["signal"] == -1).sum())
         print(f"[CHECK] close min/max: {cmin:.2f} / {cmax:.2f} | signals +1:{npos}  -1:{nneg}")
-        if abs(cmax - cmin) < 1e-6:
-            print("[WARN] close min==max → fiyat oynaksız görünüyor (yanlış format/parse?)")
     except Exception as e:
         print(f"[CHECK] Sağlık kontrolü atlandı: {e}")
 
-    sigdf["close"] = pd.to_numeric(sigdf["close"], errors="coerce").ffill().bfill()
+    sigdf["close"] = sigdf["close"].ffill().bfill()
 
-
-
-    # Olay odaklı backtest
+    # Backtest
     out, stats, trades = event_backtest(
         sigdf,
         fee=cfg["risk"].get("taker_fee", 0.0004),
@@ -228,19 +250,16 @@ def run_backtest(cfg, logger):
         min_hold_bars=cfg["risk"].get("min_hold_bars", 6),
         cooldown_bars=cfg["risk"].get("cooldown_bars", 4),
         rebalance_threshold=cfg["risk"].get("rebalance_threshold", 0.25),
+        # exit_confirm_bars vb. varsa buraya ekle
     )
 
     print("Backtest stats:", stats)
 
-
-
-    # --- İNSANİ ÖZET ---
-    # Dönem (ay cinsinden)
+    # Özet
     start_ts = sigdf.index[0]
     end_ts = sigdf.index[-1]
     months = (end_ts - start_ts).days / 30.44
 
-    # Buy & Hold getiri (aynı dönem)
     bh_ret_pct = (sigdf["close"].iloc[-1] / sigdf["close"].iloc[0] - 1.0) * 100.0
     strat_ret_pct = float(stats.get("total_return_pct", 0.0))
     diff_pct = strat_ret_pct - bh_ret_pct
@@ -254,7 +273,6 @@ def run_backtest(cfg, logger):
     print(f"Sharpe-benzeri     : {stats.get('sharpe_like', 0):.2f}")
     print(f"İşlem sayısı       : {stats.get('num_trades', 0)}")
 
-    # Kullanılan metrikler (bu stratejinin karar mantığı)
     print("\nKullanılan metrikler / kaynak veriler:")
     print("- BTC fiyat serisi (OHLCV), RSI(14), SMA(20/50), MA Cross (sma_fast vs sma_slow)")
     print("- Volatilite: ATR(14) ve ATR yüzdesi (atr_pct)")
@@ -263,7 +281,6 @@ def run_backtest(cfg, logger):
     print("- (Opsiyonel) Makro ICS takvimi kapalıysa etkisizdir. Altın (XAU) şu anda çekilmiyor; istersek ekleriz.")
     print("  Not: Altın verisini dahil etmek için 'src/data_aggregator.py' ve 'build_dataset' tarafına XAUUSD ekleyebiliriz.")
 
-    # Son 10 işlemi tablo gibi göster
     if len(trades) > 0:
         print("\nSon işlemler (en yeni 10):")
         head = f"{'time':<20} {'action':<10} {'price':>10} {'old→new':>14} {'equity':>10}"
@@ -276,11 +293,10 @@ def run_backtest(cfg, logger):
             old_t = tr.get("old_target", 0.0)
             new_t = tr.get("new_target", 0.0)
             eq = tr.get("equity", 0.0)
-            print(f"{tm[:19]:<20} {action:<10} {price:>10.2f} {old_t:>5.2f}→{new_t:<5.2f} {eq:>10.4f}")
+            print(f"{str(tm)[:19]:<20} {action:<10} {price:>10.2f} {old_t:>5.2f}→{new_t:<5.2f} {eq:>10.4f}")
     else:
         print("\nİşlem bulunmadı.")
 
-    # Dosyaları yine de kaydet
     out.to_csv(os.path.join(cfg["general"]["data_dir"], "backtest_equity.csv"))
     try:
         trades_path = os.path.join(cfg["general"]["data_dir"], "trades.csv")
@@ -298,28 +314,36 @@ def run_train(cfg, logger):
     clf = train_model(feats, cfg, model_path)
     print(f"Model saved to {model_path}")
 
+
 def main():
     ap = argparse.ArgumentParser(description="BTC Machine")
     ap.add_argument("cmd", choices=["download", "train", "backtest"], help="Action to run")
     ap.add_argument("--config", default="./config/settings.yaml")
     args = ap.parse_args()
+
     cfg = load_cfg(args.config)
     logger = get_logger(level=cfg.get("general", {}).get("log_level", "INFO"))
 
-    # Varsayılanları güvenle doldur
+    # Varsayılanlar
     cfg.setdefault("general", {})
     cfg["general"].setdefault("data_dir", "./data")
     cfg["general"].setdefault("models_dir", "./models")
     cfg["general"].setdefault("state_dir", "./state")
     cfg["general"].setdefault("log_level", "INFO")
+
     cfg.setdefault("ml", {})
     cfg["ml"].setdefault("enable", False)
 
-    # Dizinleri oluştur
+    cfg.setdefault("macro", {})
+    cfg["macro"].setdefault("use_calendar", False)
+    cfg["macro"].setdefault("ics_links", [])
+    cfg["macro"].setdefault("pre_event_hours", 2)
+    cfg["macro"].setdefault("post_event_minutes", 60)
+
+    # Dizinler
     os.makedirs(cfg["general"]["data_dir"], exist_ok=True)
     os.makedirs(cfg["general"]["models_dir"], exist_ok=True)
     os.makedirs(cfg["general"]["state_dir"], exist_ok=True)
-
 
     if args.cmd == "download":
         download_all(cfg, logger)
@@ -327,6 +351,7 @@ def main():
         run_train(cfg, logger)
     elif args.cmd == "backtest":
         run_backtest(cfg, logger)
+
 
 if __name__ == "__main__":
     main()
