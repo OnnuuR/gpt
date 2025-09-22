@@ -1,85 +1,101 @@
-# ====== GENERAL ======
+# =======================
+# GENEL
+# =======================
 general:
-  log_level: INFO
-  data_dir: ./data
-  models_dir: ./models
-  state_dir: ./state
+  data_dir: "./data"
+  models_dir: "./models"
+  state_dir: "./state"
+  log_level: "INFO"
 
-# ====== MARKET / DATA SOURCES ======
-market:
-  symbols: ["BTC/USDT"]   # ana sembol
-  timeframe: "1h"         # sıkı senkron
-  lookback_days: 120      # 3-4 ay+ (strict inner join ile efektif aralık)
-  yfinance:
-    qqq: "QQQ"            # Nasdaq-100 ETF
-    dxy: "DX-Y.NYB"       # DXY (Yahoo sembolü)
-
-# ====== SYNC (STRICT 1H INNER-JOIN) ======
+# =======================
+# SENKRONİZASYON (1h strict)
+# =======================
 sync:
-  use_sentiment: false    # true yaparsan sentiment.csv dahil edilir (1h'e indirgenir)
-  mode: "strict_1h_inner" # tüm seriler 1h’e indirgenir ve ortak kesişim alınır
+  strict_1h: true         # tüm seriler 1h'e indir ve iç-kesişim
+  lookback_days: 150      # yaklaşık ~5 ay
+  use_sentiment: false    # devre dışı (RS/NaN sorunları azaltır)
 
-# ====== FEATURES ======
+# =======================
+# ÖZELLİKLER
+# =======================
 features:
   rsi_period: 14
   sma_fast: 20
   sma_slow: 50
-  corr_window: 36         # QQQ korelasyonu için daha çevik pencere
-  atr_period: 14
+  corr_window: 48
 
-# ====== RULES (LONG & SHORT) ======
+# =======================
+# KURAL PARAMETRELERİ
+# =======================
 rules:
-  # Momentum eşikleri (daha seçici)
-  rsi_buy: 55             # long tetik: daha güçlü momentum
-  rsi_sell: 45            # short tetik: daha zayıf momentum
+  # rejim tabanı
+  base_pos_bull: 0.80
+  base_pos_bear: -0.10
+  neutral_band: 0.08
 
-  # Taraf seçim marjı (thrash’i azaltır): long_score - short_score > side_margin ise long seç
-  side_margin: 0.10
+  # momentum & MR
+  mom_look: 24
+  mom_bias_thr: 0.010
+  overlay_mom: 0.25
 
-  # Güveni kademelendir (küçük oynamalar rebalance tetiklemesin)
-  quantize_levels: [0.0, 0.25, 0.5, 0.75, 1.0]
-  conf_min_on: 0.60       # sinyal on ise min güven tabanı
+  rsi_low: 40.0
+  rsi_high: 60.0
+  overlay_mr: 0.15
 
-  # QQQ şartları (opsiyonel)
-  require_qqq_up: false
-  require_qqq_down: false
+  # slope → confidence
+  slope_look: 48
+  slope_conf_norm: 0.004
 
-  # Korelasyon & volatilite
-  min_corr_qqq: -1.0
-  atr_min_pct: 0.0008
+  # FNG
+  use_fng: true
+  fng_bias_thr: 60.0
+  fng_overlay: 0.05
 
-  # Çok düşük puanlarda flat kal
-  min_take_conf: 0.15
+  # breakout/down tetikleyicisi
+  breakout_look: 72
+  breakout_conf: 0.80
 
-# ====== RISK / EXECUTION ======
+  # short kısıtları
+  no_short_in_bull: true
+  no_long_in_bear: false
+  short_conf_cap: 0.35
+
+# =======================
+# RİSK / UYGULAMA
+# =======================
 risk:
-  position_mode: "scaled"     # confidence -> hedef maruziyet
-  target_floor_pct: 0.0       # flat kalabilsin (long/short sinyal yoksa 0)
-  max_position_pct: 1.0
-  rebalance_threshold: 0.25   # hedef/pozisyon farkı %25 altındaysa dokunma -> churn düşer
-  min_hold_bars: 6            # en az 6 bar tut (1h -> ~6 saat)
-  cooldown_bars: 2            # çıkış sonrası 2 bar bekle
+  allow_short: true
+  max_position: 0.90
+  rebalance_threshold: 0.70
+  decision_every_n_bars: 24
+  min_hold_bars: 24
+  cooldown_bars: 12
 
-  # maliyetler
-  taker_fee: 0.0004
+  fee: 0.0004
   slippage: 0.0005
 
-# ====== SENTIMENT (opsiyonel) ======
-sentiment:
-  rss_feeds:
-    - "https://www.coindesk.com/arc/outboundfeeds/rss/"
-    - "https://cointelegraph.com/rss"
-  rolling_hours: 24
-  threshold_pos: 0.2
-  threshold_neg: -0.2
+  stop_loss_pct: 0.03
+  take_profit_pct: 0.08
+  trailing_stop_pct: 0.05
 
-# ====== ML (opsiyonel) ======
+# =======================
+# ML (opsiyonel)
+# =======================
 ml:
   enable: false
+  blend_weight: 0.30
+  feature_cols: []
 
-# ====== MACRO CALENDAR (opsiyonel) ======
+# =======================
+# RAPOR
+# =======================
+report:
+  save_trades_csv: true
+  save_equity_csv: true
+
+# =======================
+# MAKRO (güvenli varsayılan)
+# =======================
 macro:
   use_calendar: false
   ics_links: []
-  pre_event_hours: 2
-  post_event_minutes: 60

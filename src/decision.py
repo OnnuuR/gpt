@@ -1,219 +1,213 @@
-from __future__ import annotations
-
-import math
-from typing import Tuple, Any, Optional, Dict, List
-
 import numpy as np
 import pandas as pd
+from typing import Tuple, Dict, Any
 
 
-# --------- yardımcılar ---------
-def _get(row: pd.Series, key: str, default: Any = None) -> Any:
-    if key in row and pd.notna(row[key]):
-        return row[key]
-    return default
-
-def _clip01(x: float) -> float:
-    return float(np.clip(float(x), 0.0, 1.0))
-
-def _as_float(x: Any, default: float = 0.0) -> float:
+def _get(row, key, default=np.nan):
+    """Row içinden güvenli şekilde float çek."""
     try:
-        if x is None or (isinstance(x, float) and math.isnan(x)):
-            return default
-        return float(x)
+        v = row.get(key, default)
     except Exception:
-        return default
-
-def _quantize(x: float, levels: List[float]) -> float:
-    if not levels:
-        return x
-    # en yakın seviyeye yuvarla
-    return float(min(levels, key=lambda l: abs(x - l)))
+        v = default
+    try:
+        return float(v)
+    except Exception:
+        return np.nan
 
 
-# --------- taraf puanlayıcıları ---------
-def _score_long(row: pd.Series, rules: Dict[str, Any]) -> float:
-    rsi_buy = _as_float(rules.get("rsi_buy", 52.0))
-    require_qqq_up = bool(rules.get("require_qqq_up", False))
-    min_corr_qqq = _as_float(rules.get("min_corr_qqq", -1.0))
-    atr_min_pct = _as_float(rules.get("atr_min_pct", 0.0008))
-
-    rsi = _as_float(_get(row, "rsi", 50.0), 50.0)
-    close = _as_float(_get(row, "close", None), 0.0)
-    sma_fast = _as_float(_get(row, "sma_fast", close), close)
-    sma_slow = _as_float(_get(row, "sma_slow", close), close)
-    atr_pct = _as_float(_get(row, "atr_pct", None), 0.0)
-
-    qqq_up = bool(_get(row, "qqq_trend_up", False))
-    corr_qqq = _get(row, "corr_qqq", None)
-    corr_qqq = _as_float(corr_qqq, np.nan) if corr_qqq is not None else np.nan
-    fng = _get(row, "fng", None)
-    fng = _as_float(fng, np.nan) if fng is not None else np.nan
-
-    regime_up = sma_fast > sma_slow
-    score = 0.7 if regime_up else 0.15  # trend baz
-
-    if rsi >= rsi_buy:
-        score += 0.25
-
-    if require_qqq_up and not qqq_up:
-        score -= 0.20
-    else:
-        if qqq_up:
-            score += 0.05
-
-    if not np.isnan(corr_qqq):
-        if corr_qqq >= max(min_corr_qqq, 0.0) and qqq_up:
-            score += 0.05
-        elif corr_qqq < min_corr_qqq:
-            score -= 0.05
-
-    if not np.isnan(fng):
-        if fng >= 60:
-            score += 0.05
-        elif fng <= 20:
-            score -= 0.05
-
-    if atr_pct >= 0.015:
-        score -= 0.08
-    elif atr_pct < atr_min_pct:
-        score -= 0.03
-
-    return _clip01(score)
-
-
-def _score_short(row: pd.Series, rules: Dict[str, Any]) -> float:
-    rsi_sell = _as_float(rules.get("rsi_sell", 48.0))
-    require_qqq_down = bool(rules.get("require_qqq_down", False))
-    min_corr_qqq = _as_float(rules.get("min_corr_qqq", -1.0))
-    atr_min_pct = _as_float(rules.get("atr_min_pct", 0.0008))
-
-    rsi = _as_float(_get(row, "rsi", 50.0), 50.0)
-    close = _as_float(_get(row, "close", None), 0.0)
-    sma_fast = _as_float(_get(row, "sma_fast", close), close)
-    sma_slow = _as_float(_get(row, "sma_slow", close), close)
-    atr_pct = _as_float(_get(row, "atr_pct", None), 0.0)
-
-    qqq_up = bool(_get(row, "qqq_trend_up", False))
-    qqq_down = not qqq_up
-    corr_qqq = _get(row, "corr_qqq", None)
-    corr_qqq = _as_float(corr_qqq, np.nan) if corr_qqq is not None else np.nan
-    fng = _get(row, "fng", None)
-    fng = _as_float(fng, np.nan) if fng is not None else np.nan
-
-    regime_dn = sma_fast < sma_slow
-    score = 0.7 if regime_dn else 0.15  # trend baz
-
-    if rsi <= rsi_sell:
-        score += 0.25
-
-    if require_qqq_down and not qqq_down:
-        score -= 0.20
-    else:
-        if qqq_down:
-            score += 0.05
-
-    if not np.isnan(corr_qqq):
-        if corr_qqq >= max(min_corr_qqq, 0.0) and qqq_down:
-            score += 0.05
-        elif corr_qqq < min_corr_qqq:
-            score -= 0.05
-
-    if not np.isnan(fng):
-        if fng <= 20:
-            score += 0.05
-        elif fng >= 60:
-            score -= 0.05
-
-    if atr_pct >= 0.015:
-        score -= 0.08
-    elif atr_pct < atr_min_pct:
-        score -= 0.03
-
-    return _clip01(score)
-
-
-# --------- ana sinyal ---------
-def rule_signal(row: pd.Series, rules: Dict[str, Any]) -> Tuple[int, float]:
+def rule_signal(feats: pd.DataFrame, i: int, cfg: Dict[str, Any]) -> Tuple[int, float]:
     """
-    Çıkış:
-      signal: -1 (short), 0 (flat), +1 (long)
-      confidence: [0..1]
+    Rejim + overlay yaklaşımı (long-short simetrik değil, boğada long-bias):
+      - Rejim: SMA fast > SMA slow (boğa) / < (ayı)
+      - Boğa: base_pos_bull, ayı: base_pos_bear
+      - Overlay: momentum + mean-reversion (+ opsiyonel FNG) + breakout/breakdown
+      - raw ∈ [-1, 1] -> nötr bant ile sinyale (sig ∈ {-1,0,1}), conf ∈ [0,1]
     """
-    long_score = _score_long(row, rules)
-    short_score = _score_short(row, rules)
+    rules = cfg.get("rules", {}) or {}
 
-    min_take = _as_float(rules.get("min_take_conf", 0.15), 0.15)
-    side_margin = _as_float(rules.get("side_margin", 0.10), 0.10)
-    conf_min_on = _as_float(rules.get("conf_min_on", 0.60), 0.60)
+    # --- temel parametreler ---
+    base_pos_bull = float(rules.get("base_pos_bull", 0.80))
+    base_pos_bear = float(rules.get("base_pos_bear", -0.10))
+    neutral_band  = float(rules.get("neutral_band", 0.08))
 
-    # taraf seçimi: marj yoksa flat kal
-    diff = long_score - short_score
-    if diff > side_margin and long_score >= min_take:
-        signal = 1
-        conf = long_score
-    elif diff < -side_margin and short_score >= min_take:
-        signal = -1
-        conf = short_score
-    else:
+    # Momentum
+    mom_look     = int(rules.get("mom_look", 24))
+    mom_bias_thr = float(rules.get("mom_bias_thr", 0.010))  # ~%1
+    overlay_mom  = float(rules.get("overlay_mom", 0.25))
+
+    # Mean-reversion (RSI)
+    rsi_low    = float(rules.get("rsi_low", 40.0))
+    rsi_high   = float(rules.get("rsi_high", 60.0))
+    overlay_mr = float(rules.get("overlay_mr", 0.15))
+
+    # Slope (confidence güçlendirme)
+    slope_look      = int(rules.get("slope_look", 48))
+    slope_conf_norm = float(rules.get("slope_conf_norm", 0.004))
+
+    # FNG (opsiyonel)
+    use_fng      = bool(rules.get("use_fng", True))
+    fng_bias_thr = float(rules.get("fng_bias_thr", 60.0))
+    fng_overlay  = float(rules.get("fng_overlay", 0.05))
+
+    # Breakout/Down
+    breakout_look  = int(rules.get("breakout_look", 72))
+    breakout_conf  = float(rules.get("breakout_conf", 0.80))
+
+    # Short’u sınırlama
+    no_short_in_bull = bool(rules.get("no_short_in_bull", True))
+    no_long_in_bear  = bool(rules.get("no_long_in_bear", False))
+    short_conf_cap   = float(rules.get("short_conf_cap", 0.35))  # short güven tavanı
+
+    row = feats.iloc[i]
+    close    = _get(row, "close")
+    sma_fast = _get(row, "sma_fast")
+    sma_slow = _get(row, "sma_slow")
+    rsi      = _get(row, "rsi_14")
+    fng      = _get(row, "fng")
+
+    if not np.isfinite(close) or not np.isfinite(sma_fast) or not np.isfinite(sma_slow):
         return 0, 0.0
 
-    # güven kademelendirme
-    levels = rules.get("quantize_levels", [0.0, 0.25, 0.5, 0.75, 1.0])
+    # --- rejim ---
+    bull = sma_fast > sma_slow
+    bear = sma_fast < sma_slow
+
+    # participation tabanı
+    base = base_pos_bull if bull else (base_pos_bear if bear else 0.0)
+
+    # --- overlay: momentum ---
+    overlay = 0.0
+    if i - mom_look >= 0:
+        prev = feats["close"].iloc[i - mom_look]
+        if np.isfinite(prev) and prev != 0.0:
+            ret = close / prev - 1.0
+            if bull and ret >  mom_bias_thr:
+                overlay += overlay_mom
+            elif bear and ret < -mom_bias_thr:
+                overlay -= overlay_mom
+
+    # --- overlay: mean-reversion (RSI) ---
+    if np.isfinite(rsi):
+        if bull and rsi <= rsi_low:
+            overlay += overlay_mr
+        if bear and rsi >= rsi_high:
+            overlay -= overlay_mr
+
+    # --- overlay: FNG ---
+    if use_fng and np.isfinite(fng):
+        if bull and fng >= fng_bias_thr:
+            overlay += fng_overlay
+        if bear and fng <= 100.0 - fng_bias_thr:
+            overlay -= fng_overlay
+
+    # ham hedef
+    raw = float(np.clip(base + overlay, -1.0, 1.0))
+
+    # boğada short kapatma / ayıda long kapatma (ayarlarla)
+    if bull and no_short_in_bull:
+        raw = max(raw, 0.0)
+    if bear and no_long_in_bear:
+        raw = min(raw, 0.0)
+
+    # nötr bant
+    if raw >  neutral_band:
+        sig = 1
+    elif raw < -neutral_band:
+        sig = -1
+    else:
+        sig = 0
+
+    # --- breakout/breakdown tetikleyicisi ---
+    if breakout_look > 4 and i - breakout_look >= 0:
+        window = feats["close"].iloc[i - breakout_look : i + 1]
+        if np.isfinite(window).all():
+            hh = float(np.max(window))
+            ll = float(np.min(window))
+            # boğada yeni tepe ve RSI makul → long’u zorla
+            if bull and close >= hh * (1.0 - 1e-6) and (not np.isfinite(rsi) or rsi >= 55):
+                sig = 1
+                # mevcut conf üzerine çıkar
+                # conf hesaplandıktan sonra max(...) ile yükselteceğiz
+                brk_long = True
+            else:
+                brk_long = False
+            # ayıda yeni dip ve RSI düşük → short’u zorla (conf short cap ile)
+            if bear and close <= ll * (1.0 + 1e-6) and (not np.isfinite(rsi) or rsi <= 45):
+                sig = -1
+                brk_short = True
+            else:
+                brk_short = False
+        else:
+            brk_long = brk_short = False
+    else:
+        brk_long = brk_short = False
+
+    # --- güven (conf) ---
+    # 1) |raw| taban
+    conf_raw = min(1.0, abs(raw))
+    # 2) kısa SMA eğimi ile güçlendirme
+    slope = 0.0
+    if i - slope_look >= 0 and "sma_fast" in feats.columns:
+        seg = feats["sma_fast"].iloc[i - slope_look : i + 1].values
+        if np.isfinite(seg).all():
+            ref = float(np.nanmean(seg))
+            if np.isfinite(ref) and ref != 0.0:
+                slope = (seg[-1] - seg[0]) / (slope_look * ref)
+    conf_slope = min(1.0, 0.5 + 0.5 * (abs(slope) / max(1e-6, slope_conf_norm)))
+
+    conf = float(np.clip(max(conf_raw, conf_slope), 0.0, 1.0))
+
+    # breakout’la minimum güven eşiği
+    if brk_long and sig == 1:
+        conf = max(conf, breakout_conf)
+    if brk_short and sig == -1:
+        conf = max(conf, breakout_conf * short_conf_cap)
+
+    # short güveni tavanla
+    if sig < 0:
+        conf = min(conf, short_conf_cap)
+
+    return sig, conf
+
+
+def ensemble_with_ml(feats: pd.DataFrame, i: int, cfg: Dict[str, Any], model=None) -> Tuple[int, float]:
+    """
+    Geriye dönük uyumluluk için sağlanan sarmalayıcı.
+    - ML devre dışıysa veya model yoksa: rule_signal(...) döndürür.
+    - ML etkinse: rule + ML basit blend.
+    """
+    sig, conf = rule_signal(feats, i, cfg)
+
     try:
-        levels = [float(x) for x in levels]
+        ml_cfg = cfg.get("ml", {}) or {}
+        if not ml_cfg.get("enable", False) or model is None:
+            return sig, conf
+
+        feature_cols = ml_cfg.get("feature_cols") or []
+        if not feature_cols or any(c not in feats.columns for c in feature_cols):
+            return sig, conf
+
+        row = feats.iloc[i]
+        x = row[feature_cols].astype(float).to_numpy()[None, :]
+
+        proba = None
+        if hasattr(model, "predict_proba"):
+            p = model.predict_proba(x)[0]
+            proba = float(p[1]) if len(p) > 1 else float(p[0])
+        elif hasattr(model, "predict"):
+            pred = float(model.predict(x)[0])
+            proba = 1.0 / (1.0 + np.exp(-np.clip(pred, -8, 8)))
+
+        if proba is None or not np.isfinite(proba):
+            return sig, conf
+
+        ml_edge = float(np.clip((proba - 0.5) * 2.0, -1.0, 1.0))
+        w = float(ml_cfg.get("blend_weight", 0.3))
+        raw = np.clip(sig * conf + w * ml_edge, -1.0, 1.0)
+
+        sig = 1 if raw > 0 else (-1 if raw < 0 else 0)
+        conf = float(np.clip(max(abs(raw), conf), 0.0, 1.0))
+
+        return sig, conf
     except Exception:
-        levels = [0.0, 0.25, 0.5, 0.75, 1.0]
-
-    conf = _clip01(conf)
-    conf = max(conf, conf_min_on)  # sinyal açıldıysa en az bu kadar
-    conf = _quantize(conf, levels)
-
-    return int(signal), float(conf)
-
-
-# --------- ML entegrasyonu (opsiyonel) ---------
-def _infer_probs(proba: Any) -> Tuple[Optional[float], Optional[float]]:
-    """
-    Çeşitli formatları (p_up, p_down) a indirger.
-    """
-    try:
-        if isinstance(proba, (int, float)) and 0.0 <= float(proba) <= 1.0:
-            p_up = float(proba)
-            return p_up, 1.0 - p_up
-        if isinstance(proba, dict):
-            keys = {str(k).lower(): v for k, v in proba.items()}
-            if "up" in keys or "1" in keys or "+1" in keys:
-                p_up = float(keys.get("up", keys.get("1", keys.get("+1"))))
-                p_down = float(keys.get("down", keys.get("-1", 1.0 - p_up)))
-                return p_up, p_down
-        if isinstance(proba, (list, tuple, np.ndarray)):
-            arr = np.array(proba, dtype=float).flatten()
-            if arr.size == 2 and 0.99 <= arr.sum() <= 1.01:
-                p_down, p_up = float(arr[0]), float(arr[1])  # sklearn: [neg, pos]
-                return p_up, p_down
-            if arr.size >= 3:
-                p_down = float(arr[0])
-                p_up = float(arr[-1])
-                return p_up, p_down
-    except Exception:
-        pass
-    return None, None
-
-
-def ensemble_with_ml(signal: int, confidence: float, proba: Any) -> Tuple[int, float]:
-    """
-    Kural sinyali ile ML olasılıklarını harmanlar.
-    """
-    if proba is None:
-        return int(signal), float(confidence)
-
-    p_up, p_down = _infer_probs(proba)
-    conf = float(confidence)
-
-    if signal > 0 and p_up is not None:
-        conf = 0.5 * conf + 0.5 * float(p_up)
-    elif signal < 0 and p_down is not None:
-        conf = 0.5 * conf + 0.5 * float(p_down)
-
-    return int(signal), _clip01(conf)
+        return sig, conf
