@@ -56,66 +56,119 @@ from typing import Dict, Any
 
 def build_dataset(cfg: Dict[str, Any], logger) -> pd.DataFrame:
     """
-    Ana BTC veri setini yükler, yapılandırmada belirtilen opsiyonel veri 
-    setleriyle birleştirir, özellikleri hesaplar ve sonuç DataFrame'ini döndürür.
-
-    Args:
-        cfg (Dict[str, Any]): Veri yolları ve özellik parametrelerini içeren 
-                               yapılandırma sözlüğü.
-        logger: Bilgilendirme ve hata mesajları için yapılandırılmış logger nesnesi.
-
-    Returns:
-        pd.DataFrame: Tüm verilerin birleştirildiği ve özelliklerin eklendiği 
-                      nihai DataFrame.
+    Ana BTC veri setini yükler, opsiyonel setleri toleranslı/sınırlı doldurma ile
+    senkronize eder, özellikleri hesaplar ve nihai DataFrame'i döndürür.
     """
-    # 1. Ana BTC Veri Setini Yükle
+    # --- 1) BTC OHLCV (zorunlu) ---
     logger.info("Ana BTC OHLCV verisi yükleniyor...")
     base_path = os.path.join(cfg["general"]["data_dir"], "btc_ohlcv.csv")
     try:
         base = pd.read_csv(base_path, index_col=0)
         base.index = pd.to_datetime(base.index, utc=True, errors="coerce")
-        base = base[["open", "high", "low", "close", "volume"]]
+        base = base[["open", "high", "low", "close", "volume"]].sort_index()
     except FileNotFoundError:
         logger.error(f"Ana veri seti bulunamadı: {base_path}")
         raise
 
-    # 2. Opsiyonel Veri Setlerini Yükle ve Birleştir
-    merged = base.copy()
-    loaded_data = {"BTC": base}
-
-    # Tekrarlanan işlemleri önlemek için bir yapı kuralım
-    optional_datasets_config = {
-        "qqq": {"filename": "qqq.csv", "cols": ["qqq_close"]},
-        "dxy": {"filename": "dxy.csv", "cols": ["dxy_close"]},
-        "sentiment": {"filename": "sentiment.csv", "cols": ["sentiment"]},
-        "fng": {"filename": "fng.csv", "cols": ["fng"]},
-    }
-
-    for name, info in optional_datasets_config.items():
-        path = os.path.join(cfg["general"]["data_dir"], info["filename"])
+    # Küçük yardımcı
+    def _read_csv(path: str) -> pd.DataFrame:
         if os.path.exists(path):
-            try:
-                df = pd.read_csv(path, index_col=0)
-                df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
-                
-                # FNG için özel işlem (yeniden örnekleme)
-                data_to_join = df[info["cols"]]
-                if name == "fng":
-                    data_to_join = data_to_join.resample("1h").ffill()
-                
-                merged = merged.join(data_to_join, how="left")
-                loaded_data[name.upper()] = df
-                logger.info(f"-> Başarıyla yüklendi ve birleştirildi: {name.upper()}")
-            except Exception as e:
-                logger.warning(f"{name.upper()} verisi yüklenirken hata oluştu, atlanıyor: {e}")
-        else:
-            logger.warning(f"Opsiyonel veri dosyası bulunamadı, atlanıyor: {path}")
-    
-    # 3. Eksik Verileri Doldur
-    logger.info("Birleştirme sonrası eksik veriler dolduruluyor (ffill -> bfill)...")
-    merged = merged.ffill().bfill().infer_objects(copy=False)
+            df = pd.read_csv(path, index_col=0)
+            df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
+            return df.sort_index()
+        return pd.DataFrame()
 
-    # 4. Çekirdek Özellikleri Ekle
+    # --- 2) Opsiyonel setleri oku ---
+    data_dir = cfg["general"]["data_dir"]
+    qqq = _read_csv(os.path.join(data_dir, "qqq.csv"))           # beklenen sütun: qqq_close
+    dxy = _read_csv(os.path.join(data_dir, "dxy.csv"))           # beklenen sütun: dxy_close
+    sent = _read_csv(os.path.join(data_dir, "sentiment.csv"))    # beklenen sütun: sentiment
+    fng  = _read_csv(os.path.join(data_dir, "fng.csv"))          # beklenen sütun: fng
+
+    # Tolerans/limitler (varsayılanlar config yoksa çalışır)
+    sync_cfg = cfg.get("sync", {}) if isinstance(cfg.get("sync", {}), dict) else {}
+    qtol_min = int(sync_cfg.get("qqq_tolerance_minutes", 120))
+    dtol_min = int(sync_cfg.get("dxy_tolerance_minutes", 180))
+    sent_ffill_h = int(sync_cfg.get("sentiment_ffill_hours", 6))
+    fng_ffill_h  = int(sync_cfg.get("fng_ffill_hours", 48))
+
+    # Çalışma penceresi: BTC aralığı
+    start, end = base.index.min(), base.index.max()
+    merged = base.copy()
+
+    # --- 3) QQQ: toleranslı eşleme (merge_asof, backward) + sınırlı ffill ---
+    if not qqq.empty and "qqq_close" in qqq.columns:
+        qqq_clip = qqq.loc[(qqq.index >= start) & (qqq.index <= end), ["qqq_close"]]
+        merged = pd.merge_asof(
+            merged.sort_index(), qqq_clip.sort_index(),
+            left_index=True, right_index=True,
+            direction="backward",
+            tolerance=pd.Timedelta(minutes=qtol_min)
+        )
+        # Toleransın saat cinsinden sınırlı ileri doldurma (bfill yok!)
+        merged["qqq_close"] = merged["qqq_close"].ffill(limit=max(1, qtol_min // 60))
+        logger.info("-> Başarıyla yüklendi ve birleştirildi: QQQ")
+    else:
+        logger.info("QQQ yok veya 'qqq_close' sütunu bulunamadı, atlanıyor.")
+
+    # --- 4) DXY: toleranslı eşleme + sınırlı ffill ---
+    if not dxy.empty and "dxy_close" in dxy.columns:
+        dxy_clip = dxy.loc[(dxy.index >= start) & (dxy.index <= end), ["dxy_close"]]
+        merged = pd.merge_asof(
+            merged.sort_index(), dxy_clip.sort_index(),
+            left_index=True, right_index=True,
+            direction="backward",
+            tolerance=pd.Timedelta(minutes=dtol_min)
+        )
+        merged["dxy_close"] = merged["dxy_close"].ffill(limit=max(1, dtol_min // 60))
+        logger.info("-> Başarıyla yüklendi ve birleştirildi: DXY")
+    else:
+        logger.info("DXY yok veya 'dxy_close' sütunu bulunamadı, atlanıyor.")
+
+    # --- 5) SENTIMENT: 1H'e indir, sınırlı ffill; bfill YOK ---
+    if not sent.empty and "sentiment" in sent.columns:
+        sent_h = sent[["sentiment"]].resample("1h").mean()
+        sent_h = sent_h.loc[(sent_h.index >= start) & (sent_h.index <= end)]
+        merged = merged.join(sent_h, how="left")
+        merged["sentiment"] = merged["sentiment"].ffill(limit=max(1, sent_ffill_h))
+        logger.info("-> Başarıyla yüklendi ve birleştirildi: SENTIMENT")
+    else:
+        logger.info("SENTIMENT yok veya 'sentiment' sütunu bulunamadı, atlanıyor.")
+
+    # --- 6) FNG: günlük → 1H; yalnızca ffill (bfill yok) ---
+    if not fng.empty and "fng" in fng.columns:
+        fng_h = fng[["fng"]].resample("1h").ffill()
+        fng_h = fng_h.loc[(fng_h.index >= start) & (fng_h.index <= end)]
+        merged = merged.join(fng_h, how="left")
+        # İstersen limitli ffill de uygulanabilir; günlük veri olduğu için gerek yok.
+        logger.info("-> Başarıyla yüklendi ve birleştirildi: FNG")
+    else:
+        logger.info("FNG yok veya 'fng' sütunu bulunamadı, atlanıyor.")
+
+    # --- 7) GLOBAL FILL YOK ---
+    # Sadece 'close' serisini güvene al (NaN kalmasın)
+    merged["close"] = pd.to_numeric(merged["close"], errors="coerce").ffill().bfill()
+
+    # --- 8) Yüklenen veri özetleri ---
+    logger.info("--- Veri Yükleme Özeti ---")
+    loaded_data = {
+        "BTC": base,
+        "QQQ": qqq if not qqq.empty else pd.DataFrame(),
+        "DXY": dxy if not dxy.empty else pd.DataFrame(),
+        "SENTIMENT": sent if not sent.empty else pd.DataFrame(),
+        "FNG": fng if not fng.empty else pd.DataFrame(),
+    }
+    for name, df_ in loaded_data.items():
+        if not df_.empty:
+            logger.info(f"[{name}] Zaman aralığı: {df_.index.min()} -> {df_.index.max()} | Satır sayısı: {len(df_)}")
+
+    # NaN oranlarını göster (ffill sonrası)
+    nan_rates = merged.isna().mean()
+    nan_msg = ", ".join([f"{c}:{r*100:.1f}%" for c, r in nan_rates.items() if r > 0])
+    if nan_msg:
+        logger.info(f"[SYNC] NaN oranları (ffill sınırlı uygulandı): {nan_msg}")
+
+    # --- 9) Çekirdek özellikler ---
     logger.info("Çekirdek özellikler (feature) hesaplanıyor...")
     feats = add_core_features(
         merged,
@@ -126,14 +179,7 @@ def build_dataset(cfg: Dict[str, Any], logger) -> pd.DataFrame:
         qqq_col="qqq_close",
     )
 
-    # 5. Yüklenen Verilerin Özetini Yazdır
-    logger.info("--- Veri Yükleme Özeti ---")
-    for name, df in loaded_data.items():
-        logger.info(
-            f"[{name}] Zaman aralığı: {df.index.min()} -> {df.index.max()} | Satır sayısı: {len(df)}"
-        )
-    
-    # 6. Sonuç DataFrame'ini Döndür (Döngünün Dışında!)
+    # --- 10) Sonuç ---
     return feats
 
 def run_backtest(cfg, logger):
