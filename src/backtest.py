@@ -23,9 +23,13 @@ def event_backtest(
     rebalance_threshold=0.5,
     exit_confirm_bars=2,
 ):
-    close = df["close"].astype(float).to_numpy()
-    sig = df["signal"].astype(int).to_numpy()
-    conf = df["confidence"].astype(float).to_numpy()
+    df = df.sort_index()
+    close = pd.to_numeric(df["close"], errors="coerce").ffill().bfill().to_numpy(dtype=float)
+    sig = pd.to_numeric(df["signal"], errors="coerce").fillna(0).to_numpy(dtype=int)
+    conf = pd.to_numeric(df["confidence"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+
+    if len(close) >= 2 and np.allclose(close, close[0], rtol=0, atol=1e-9):
+        print("[WARN] close serisi sabit görünüyor — PnL üretilmez. Veri kaynağını kontrol edin.")
 
     equity = [1.0]
     target = 0.0
@@ -65,14 +69,30 @@ def event_backtest(
         if abs(new_target - target) > 1e-9:
             trade_cost = abs(new_target - target) * cost
             equity[-1] *= (1.0 - trade_cost)
-            trades.append({"i": i, "price": price, "delta": new_target - target, "equity": equity[-1]})
+
+            old_target = target
             target = new_target
             last_trade_i = i
             entry_i = i if target > 0.0 else -10**9
 
-        # Fiyat hareketi
-        ret = (price / (price_prev + 1e-12)) - 1.0
-        equity.append(equity[-1] * (1.0 + target * ret))
+            # --- ZAMAN ve AKSİYON ---
+            tstamp = df.index[i]  # pandas.Timestamp
+            if target == 0.0 and old_target > 0.0:
+                action = "EXIT"
+            elif old_target <= 0.0 and target > 0.0:
+                action = "ENTER"
+            else:
+                action = "REBALANCE"
+
+            trades.append({
+                "i": i,
+                "time": str(tstamp),
+                "action": action,
+                "price": float(price),
+                "old_target": float(old_target),
+                "new_target": float(target),
+                "equity": float(equity[-1]),
+            })
 
     out = df.copy().iloc[: len(equity)]
     out["equity"] = equity

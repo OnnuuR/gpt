@@ -7,16 +7,15 @@ def _isfinite(x):
         return False
 
 def rule_signal(row, params):
-    # Esnek varsayılanlar (settings.yaml override edebilir)
-    rsi_buy = params.get("rsi_buy", 30)
+    # Esnek varsayılanlar (settings.yaml override eder)
+    rsi_buy = params.get("rsi_buy", 35)                # 30 -> 35
     rsi_sell = params.get("rsi_sell", 70)
-    sentiment_min = params.get("sentiment_min", 0.05)      # daha esnek
+    sentiment_min = params.get("sentiment_min", 0.05)
     exit_sent_thresh = params.get("exit_sent_thresh", -0.5)
-    atr_min_pct = params.get("atr_min_pct", 0.0015)        # 0.15%
-    require_qqq_up = params.get("require_qqq_up", False)   # default False
-    min_corr_qqq = params.get("min_corr_qqq", -0.05)       # nötre izin ver
+    atr_min_pct = params.get("atr_min_pct", 0.0015)
+    require_qqq_up = params.get("require_qqq_up", False)
+    min_corr_qqq = params.get("min_corr_qqq", -0.05)
 
-    # Girdiler
     rsi = row.get("rsi", np.nan)
     sent = row.get("sentiment_smooth", row.get("sentiment", np.nan))
     q_up = row.get("qqq_trend_up", np.nan)
@@ -25,17 +24,18 @@ def rule_signal(row, params):
     sma_slow = row.get("sma_slow", np.nan)
     close = row.get("close", np.nan)
     atrp = row.get("atr_pct", np.nan)
+    cross_up = int(row.get("ma_cross_up", 0))
 
-    # Rejim filtresi
+    # Rejim
     ok_regime = (_isfinite(sma_fast) and _isfinite(sma_slow) and sma_fast > sma_slow)
     if require_qqq_up and _isfinite(q_up):
         ok_regime = ok_regime and int(q_up) == 1
 
-    # Volatilite & korelasyon: NaN ise bloke etme
+    # Vol/korelasyon
     ok_vol = (not _isfinite(atrp)) or (atrp >= atr_min_pct)
     ok_corr = (not _isfinite(corrq)) or (corrq >= min_corr_qqq)
 
-    # Duygu: veri yoksa nötr kabul et
+    # Sentiment: yoksa nötr
     if not _isfinite(sent) or abs(float(sent)) < 1e-6:
         ok_sent = True
         sent_val = 0.0
@@ -43,8 +43,18 @@ def rule_signal(row, params):
         sent_val = float(sent)
         ok_sent = sent_val >= sentiment_min
 
-    # Giriş/Çıkış
-    allow_long = (_isfinite(rsi) and rsi < rsi_buy) and ok_regime and ok_vol and ok_corr and ok_sent
+    # --- Giriş kuralları (OR ile birleştirildi) ---
+    # 1) Uptrend'de RSI dipten al
+    long_1 = (_isfinite(rsi) and rsi < rsi_buy and ok_regime)
+    # 2) MA cross up anında, RSI aşırı olmasa da
+    long_2 = (cross_up == 1 and _isfinite(rsi) and rsi < 55)
+    # 3) RSI < 40 ve fiyat SMA_fast üstünde (dipten toparlanma)
+    long_3 = (_isfinite(rsi) and rsi < max(40, rsi_buy) and _isfinite(close) and _isfinite(sma_fast) and close > sma_fast)
+
+    allow_long_base = long_1 or long_2 or long_3
+    allow_long = allow_long_base and ok_vol and ok_corr and ok_sent
+
+    # Çıkış
     allow_exit = ((_isfinite(rsi) and rsi > rsi_sell and _isfinite(close) and _isfinite(sma_fast) and close < sma_fast)
                   or (sent_val < exit_sent_thresh))
 
@@ -53,10 +63,13 @@ def rule_signal(row, params):
     # Güven skoru
     conf = 0.0
     if signal == 1:
-        rsi_term = min(1.0, (rsi_buy - rsi) / max(rsi_buy, 1))
+        rsi_term = 0.0 if not _isfinite(rsi) else min(1.0, (max(rsi_buy, 1) - rsi) / max(rsi_buy, 1))
         sent_term = max(0.0, sent_val)
         vol_term = 1.0 if not _isfinite(atrp) else min(1.0, (atrp / max(atr_min_pct, 1e-9)))
-        conf = float(min(1.0, 0.5 * rsi_term + 0.4 * sent_term + 0.1 * vol_term))
+        base = 0.5 * rsi_term + 0.4 * sent_term + 0.1 * vol_term
+        if long_2:  # MA cross boost
+            base = max(base, 0.6)
+        conf = float(min(1.0, base))
     elif signal == -1:
         conf = 0.6
 

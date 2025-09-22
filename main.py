@@ -145,8 +145,77 @@ def run_backtest(cfg, logger):
     )
 
     print("Backtest stats:", stats)
+
+    # --- Hızlı sağlık kontrolü ---
+    try:
+        sigdf = sigdf.sort_index()
+        cmin, cmax = float(sigdf["close"].min()), float(sigdf["close"].max())
+        npos = int((sigdf["signal"] == 1).sum())
+        nneg = int((sigdf["signal"] == -1).sum())
+        print(f"[CHECK] close min/max: {cmin:.2f} / {cmax:.2f} | signals +1:{npos}  -1:{nneg}")
+        if abs(cmax - cmin) < 1e-6:
+            print("[WARN] close min==max → fiyat oynaksız görünüyor (yanlış format/parse?)")
+    except Exception as e:
+        print(f"[CHECK] Sağlık kontrolü atlandı: {e}")
+
+
+    # --- İNSANİ ÖZET ---
+    # Dönem (ay cinsinden)
+    start_ts = sigdf.index[0]
+    end_ts = sigdf.index[-1]
+    months = (end_ts - start_ts).days / 30.44
+
+    # Buy & Hold getiri (aynı dönem)
+    bh_ret_pct = (sigdf["close"].iloc[-1] / sigdf["close"].iloc[0] - 1.0) * 100.0
+    strat_ret_pct = float(stats.get("total_return_pct", 0.0))
+    diff_pct = strat_ret_pct - bh_ret_pct
+
+    print("\n================= ÖZET =================")
+    print(f"Dönem              : {start_ts}  →  {end_ts}  (~{months:.1f} ay)")
+    print(f"Buy & Hold Getirisi: {bh_ret_pct:+.2f}%")
+    print(f"Strateji Getirisi  : {strat_ret_pct:+.2f}%")
+    print(f"Fark (Strat - B&H) : {diff_pct:+.2f}%")
+    print(f"Maks. DD           : {stats.get('max_dd_pct', 0):.2f}%")
+    print(f"Sharpe-benzeri     : {stats.get('sharpe_like', 0):.2f}")
+    print(f"İşlem sayısı       : {stats.get('num_trades', 0)}")
+
+    # Kullanılan metrikler (bu stratejinin karar mantığı)
+    print("\nKullanılan metrikler / kaynak veriler:")
+    print("- BTC fiyat serisi (OHLCV), RSI(14), SMA(20/50), MA Cross (sma_fast vs sma_slow)")
+    print("- Volatilite: ATR(14) ve ATR yüzdesi (atr_pct)")
+    print("- Geleneksel piyasa: QQQ (Nasdaq 100 ETF) → trend & BTC-QQQ korelasyonu")
+    print("- Duygu (haber): CoinDesk & Cointelegraph RSS başlıkları → VADER sentiment (opsiyonel)")
+    print("- (Opsiyonel) Makro ICS takvimi kapalıysa etkisizdir. Altın (XAU) şu anda çekilmiyor; istersek ekleriz.")
+    print("  Not: Altın verisini dahil etmek için 'src/data_aggregator.py' ve 'build_dataset' tarafına XAUUSD ekleyebiliriz.")
+
+    # Son 10 işlemi tablo gibi göster
+    if len(trades) > 0:
+        print("\nSon işlemler (en yeni 10):")
+        head = f"{'time':<20} {'action':<10} {'price':>10} {'old→new':>14} {'equity':>10}"
+        print(head)
+        print("-" * len(head))
+        for tr in trades[-10:]:
+            tm = tr.get("time", "")
+            action = tr.get("action", "")
+            price = tr.get("price", 0.0)
+            old_t = tr.get("old_target", 0.0)
+            new_t = tr.get("new_target", 0.0)
+            eq = tr.get("equity", 0.0)
+            print(f"{tm[:19]:<20} {action:<10} {price:>10.2f} {old_t:>5.2f}→{new_t:<5.2f} {eq:>10.4f}")
+    else:
+        print("\nİşlem bulunmadı.")
+
+    # Dosyaları yine de kaydet
     out.to_csv(os.path.join(cfg["general"]["data_dir"], "backtest_equity.csv"))
+    try:
+        trades_path = os.path.join(cfg["general"]["data_dir"], "trades.csv")
+        pd.DataFrame(trades).to_csv(trades_path, index=False)
+        print(f"\nKaydedildi: {trades_path}")
+    except Exception:
+        pass
+
     return stats
+
 
 def run_train(cfg, logger):
     feats = build_dataset(cfg, logger)
