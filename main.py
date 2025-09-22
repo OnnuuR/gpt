@@ -195,7 +195,6 @@ def run_backtest(cfg, logger):
     # Dosyaları yine de kaydet
     out.to_csv(os.path.join(cfg["general"]["data_dir"], "backtest_equity.csv"))
     try:
-        import os
         trades_path = os.path.join(cfg["general"]["data_dir"], "trades.csv")
         pd.DataFrame(trades).to_csv(trades_path, index=False)
         print(f"\nKaydedildi: {trades_path}")
