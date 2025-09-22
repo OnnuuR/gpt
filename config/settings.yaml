@@ -1,44 +1,46 @@
 general:
   data_dir: "./data"
   models_dir: "./models"
-  state_dir: "./state"   # ← eklendi
+  state_dir: "./state"
   log_level: "INFO"
 
-
-
 market:
-  timeframe: "1h"
-  lookback_days: 120   # 3-4 ay
+  timeframe: "1h"        # tüm kaynaklar 1 saatlik banda indiriliyor
+  lookback_days: 120     # 3-4 aylık kesit (tam eş-zamanlı kesişim için ideal)
 
 sync:
-  use_sentiment: false # RSS çok seyrek olduğu için eş-zamanlı seti aşırı daraltmasın
+  use_sentiment: false   # RSS seyrek; eş-zamanlı kesişimi daraltmasın
 
 features:
   rsi_period: 14
   sma_fast: 20
   sma_slow: 50
-  corr_window: 72
-
-ml:
-  enable: false
-  # model_file: "btc_gb.joblib"  # istersen bu adı da kullanırız; şu an main.py sabit isimle bakıyor
-
+  corr_window: 72        # BTC-QQQ korelasyonu için pencere (saat)
 
 rules:
   rsi_buy: 45
   rsi_sell: 65
-  sentiment_min: 0.0     # sentiment kapalıysa zaten etkisiz
-  atr_min_pct: 0.0010    # eş-zamanlı pencerede yeterli volatilite
-  require_qqq_up: true   # QQQ ile uyuşuk saatleri eleyelim; US seansına odaklanır
+  sentiment_min: 0.0     # sentiment kapalı ise etkisiz
+  atr_min_pct: 0.0010    # eş-zamanlı pencerede minimum volatilite eşiği
+  require_qqq_up: true   # QQQ trend yukarı değilse filtrele
   min_corr_qqq: 0.00     # negatif korelasyon saatlerini ele
 
 risk:
-  max_position_pct: 1.0      # tavanı aç
-  position_mode: "scaled"     # istersen "full" yapabilirsin
-  target_floor_pct: 0.30      # scaled modda asgari %30
-  min_hold_bars: 4            # US seans bloklarında daha kısa tutabiliriz
+  max_position_pct: 1.0      # pozisyon tavanı (%100)
+  position_mode: "scaled"     # "scaled" (confidence ile ölçekli) | "full" (tam)
+  target_floor_pct: 0.30      # scaled modda alt sınır (örn %30)
+  min_hold_bars: 4            # US seans bloklarına uygun daha kısa tutuş
   cooldown_bars: 3
-  rebalance_threshold: 0.20
+  rebalance_threshold: 0.20   # hedef farkı >= %20*max_pos ise rebalance
   exit_confirm_bars: 1
   taker_fee: 0.0004
   slippage: 0.0005
+
+macro:
+  use_calendar: false
+  ics_links: []               # istersen ICS adresleri ekleyebilirsin
+  event_buffer_hours: 2
+
+ml:
+  enable: false               # model yoksa false; ekleyince true yap
+  # model_file: "btc_gb.joblib"
