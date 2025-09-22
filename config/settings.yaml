@@ -7,77 +7,79 @@ general:
 
 # ====== MARKET / DATA SOURCES ======
 market:
-  symbols: ["BTC/USDT"]   # CCXT borsa sembolü
-  timeframe: "1h"         # bu repo şimdilik senkron 1 saatlik çalışıyor
-  lookback_days: 120      # veriyi son N günle sınırla (strict join için 90-180 iyi)
+  symbols: ["BTC/USDT"]   # ana sembol
+  timeframe: "1h"         # sıkı senkron
+  lookback_days: 120      # 3-4 ay+ (strict inner join ile efektif aralık)
   yfinance:
     qqq: "QQQ"            # Nasdaq-100 ETF
-    dxy: "DX-Y.NYB"       # Dolar endeksi (Yahoo'da bu sembol genelde çalışıyor)
+    dxy: "DX-Y.NYB"       # DXY (Yahoo sembolü)
 
 # ====== SYNC (STRICT 1H INNER-JOIN) ======
 sync:
-  use_sentiment: false    # true yaparsan sentiment.csv 1h'e ortalanıp dahil edilir
-  mode: "strict_1h_inner" # tüm seriler 1h’e indirgenir ve kesişim alınır
+  use_sentiment: false    # true yaparsan sentiment.csv dahil edilir (1h'e indirgenir)
+  mode: "strict_1h_inner" # tüm seriler 1h’e indirgenir ve ortak kesişim alınır
 
 # ====== FEATURES ======
 features:
   rsi_period: 14
   sma_fast: 20
   sma_slow: 50
-  corr_window: 36         # QQQ korelasyonu için rolling pencere (daha çevik)
-  atr_period: 14          # ATR hesaplaması (kod varsayılanı 14 — burada da dursun)
+  corr_window: 36         # QQQ korelasyonu için daha çevik pencere
+  atr_period: 14
 
-# ====== RULES (LONG & SHORT DESTEKLİ) ======
-# rule_signal her bar için hem long hem short puanlayıp güçlü tarafı seçer.
+# ====== RULES (LONG & SHORT) ======
 rules:
-  # Momentum tetikleri
-  rsi_buy: 52             # long için RSI eşiği
-  rsi_sell: 48            # short için RSI eşiği
+  # Momentum eşikleri (daha seçici)
+  rsi_buy: 55             # long tetik: daha güçlü momentum
+  rsi_sell: 45            # short tetik: daha zayıf momentum
 
-  # QQQ koşulları (opsiyonel katılık)
+  # Taraf seçim marjı (thrash’i azaltır): long_score - short_score > side_margin ise long seç
+  side_margin: 0.10
+
+  # Güveni kademelendir (küçük oynamalar rebalance tetiklemesin)
+  quantize_levels: [0.0, 0.25, 0.5, 0.75, 1.0]
+  conf_min_on: 0.60       # sinyal on ise min güven tabanı
+
+  # QQQ şartları (opsiyonel)
   require_qqq_up: false
   require_qqq_down: false
 
-  # Korelasyon & volatilite eşikleri
-  min_corr_qqq: -1.0      # çok gevşek tutuyoruz; istersen 0.0 yap
-  atr_min_pct: 0.0008     # çok düşük volatilitede sinyali biraz zayıflat
+  # Korelasyon & volatilite
+  min_corr_qqq: -1.0
+  atr_min_pct: 0.0008
 
-  # Sinyal alım eşiği (iki taraftan da puan düşükse flat kal)
+  # Çok düşük puanlarda flat kal
   min_take_conf: 0.15
 
 # ====== RISK / EXECUTION ======
 risk:
-  position_mode: "scaled"     # confidence → hedef maruziyet
-  target_floor_pct: 0.40      # (event_backtest destekliyorsa) min hedef
-  max_position_pct: 1.0       # üst sınır
-  rebalance_threshold: 0.10   # hedefe yakınsama eşiği (daha küçük = daha sık rebalance)
-  min_hold_bars: 2            # çok hızlı flip’leri azalt
-  cooldown_bars: 1            # çıkış sonrası kısa bekleme
+  position_mode: "scaled"     # confidence -> hedef maruziyet
+  target_floor_pct: 0.0       # flat kalabilsin (long/short sinyal yoksa 0)
+  max_position_pct: 1.0
+  rebalance_threshold: 0.25   # hedef/pozisyon farkı %25 altındaysa dokunma -> churn düşer
+  min_hold_bars: 6            # en az 6 bar tut (1h -> ~6 saat)
+  cooldown_bars: 2            # çıkış sonrası 2 bar bekle
 
-  # Maliyet varsayımları
+  # maliyetler
   taker_fee: 0.0004
   slippage: 0.0005
 
-  # (Destekliyorsa) çıkış teyidi gibi parametreleri de ekleyebilirsin:
-  # exit_confirm_bars: 1
-
-# ====== SENTIMENT (RSS → VADER) ======
+# ====== SENTIMENT (opsiyonel) ======
 sentiment:
   rss_feeds:
     - "https://www.coindesk.com/arc/outboundfeeds/rss/"
     - "https://cointelegraph.com/rss"
-  rolling_hours: 24           # 1h resample öncesi pencereli ortalama
-  threshold_pos: 0.2          # (kullanılmıyor olabilir; referans için)
+  rolling_hours: 24
+  threshold_pos: 0.2
   threshold_neg: -0.2
 
-# ====== ML (OPSİYONEL) ======
-# main.py model yolunu zaten ./models/btc_gb.joblib olarak kuruyor; burası sadece bayrak.
+# ====== ML (opsiyonel) ======
 ml:
   enable: false
 
-# ====== MACRO CALENDAR (OPSİYONEL) ======
+# ====== MACRO CALENDAR (opsiyonel) ======
 macro:
   use_calendar: false
-  ics_links: []               # örn: ["https://…/FOMC.ics"]
+  ics_links: []
   pre_event_hours: 2
   post_event_minutes: 60
