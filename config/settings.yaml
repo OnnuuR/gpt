@@ -19,6 +19,11 @@ features:
   sma_slow: 50
   corr_window: 72
 
+ml:
+  enable: false
+  # model_file: "btc_gb.joblib"  # istersen bu adı da kullanırız; şu an main.py sabit isimle bakıyor
+
+
 rules:
   rsi_buy: 45
   rsi_sell: 65

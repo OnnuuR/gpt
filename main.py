@@ -172,7 +172,9 @@ def run_backtest(cfg, logger):
     feats = build_dataset(cfg, logger)
     # optional ML
     model_path = os.path.join(cfg["general"]["models_dir"], "btc_gb.joblib")
-    model = load(model_path) if (cfg["ml"]["enable"] and os.path.exists(model_path)) else None
+    ml_cfg = cfg.get("ml", {})
+    model = load(model_path) if (ml_cfg.get("enable", False) and os.path.exists(model_path)) else None
+
 
     rows = []
     # macro gating
@@ -310,6 +312,8 @@ def main():
     cfg["general"].setdefault("models_dir", "./models")
     cfg["general"].setdefault("state_dir", "./state")
     cfg["general"].setdefault("log_level", "INFO")
+    cfg.setdefault("ml", {})
+    cfg["ml"].setdefault("enable", False)
 
     # Dizinleri oluştur
     os.makedirs(cfg["general"]["data_dir"], exist_ok=True)
