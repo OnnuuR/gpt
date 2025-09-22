@@ -1,101 +1,75 @@
-# =======================
-# GENEL
-# =======================
 general:
   data_dir: "./data"
   models_dir: "./models"
   state_dir: "./state"
   log_level: "INFO"
 
-# =======================
-# SENKRONİZASYON (1h strict)
-# =======================
 sync:
-  strict_1h: true         # tüm seriler 1h'e indir ve iç-kesişim
-  lookback_days: 150      # yaklaşık ~5 ay
-  use_sentiment: false    # devre dışı (RS/NaN sorunları azaltır)
+  strict_1h: true
+  lookback_days: 150
+  use_sentiment: false
 
-# =======================
-# ÖZELLİKLER
-# =======================
 features:
   rsi_period: 14
   sma_fast: 20
   sma_slow: 50
   corr_window: 48
 
-# =======================
-# KURAL PARAMETRELERİ
-# =======================
 rules:
-  # rejim tabanı
-  base_pos_bull: 0.80
+  base_pos_bull: 0.90
   base_pos_bear: -0.10
-  neutral_band: 0.08
+  neutral_band: 0.10
 
-  # momentum & MR
+  rsi_low: 45.0
+  rsi_high: 55.0
   mom_look: 24
   mom_bias_thr: 0.010
-  overlay_mom: 0.25
 
-  rsi_low: 40.0
-  rsi_high: 60.0
-  overlay_mr: 0.15
+  breakout_look: 48
+  breakout_conf: 0.85
+
+  # QQQ overlay
+  qqq_look: 120
+  qqq_boost: 0.10
+  qqq_drag: 0.05
+
+  # FNG overlay
+  use_fng: true
+  fng_bias_thr: 55.0
+  fng_overlay: 0.05
 
   # slope → confidence
   slope_look: 48
-  slope_conf_norm: 0.004
-
-  # FNG
-  use_fng: true
-  fng_bias_thr: 60.0
-  fng_overlay: 0.05
-
-  # breakout/down tetikleyicisi
-  breakout_look: 72
-  breakout_conf: 0.80
+  slope_conf_norm: 0.0035
 
   # short kısıtları
   no_short_in_bull: true
-  no_long_in_bear: false
-  short_conf_cap: 0.35
+  short_conf_cap: 0.30
 
-# =======================
-# RİSK / UYGULAMA
-# =======================
 risk:
-  allow_short: true
-  max_position: 0.90
+  allow_short: false          # önce long-only ile stabil sonuç alalım
+  max_position: 1.0
   rebalance_threshold: 0.70
-  decision_every_n_bars: 24
-  min_hold_bars: 24
-  cooldown_bars: 12
+  decision_every_n_bars: 12
+  min_hold_bars: 12
+  cooldown_bars: 6
 
   fee: 0.0004
   slippage: 0.0005
 
-  stop_loss_pct: 0.03
-  take_profit_pct: 0.08
-  trailing_stop_pct: 0.05
+  stop_loss_pct: 0.06         # daha gevşek SL
+  take_profit_pct: 0.0        # TP kapalı → trendleri trailing ile sür
+  trailing_stop_pct: 0.08     # geniş trailing
 
-# =======================
-# ML (opsiyonel)
-# =======================
 ml:
   enable: false
   blend_weight: 0.30
   feature_cols: []
 
-# =======================
-# RAPOR
-# =======================
 report:
   save_trades_csv: true
   save_equity_csv: true
 
-# =======================
-# MAKRO (güvenli varsayılan)
-# =======================
 macro:
   use_calendar: false
   ics_links: []
