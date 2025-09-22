@@ -1,46 +1,83 @@
+# ====== GENERAL ======
 general:
-  data_dir: "./data"
-  models_dir: "./models"
-  state_dir: "./state"
-  log_level: "INFO"
+  log_level: INFO
+  data_dir: ./data
+  models_dir: ./models
+  state_dir: ./state
 
+# ====== MARKET / DATA SOURCES ======
 market:
-  timeframe: "1h"        # tüm kaynaklar 1 saatlik banda indiriliyor
-  lookback_days: 120     # 3-4 aylık kesit (tam eş-zamanlı kesişim için ideal)
+  symbols: ["BTC/USDT"]   # CCXT borsa sembolü
+  timeframe: "1h"         # bu repo şimdilik senkron 1 saatlik çalışıyor
+  lookback_days: 120      # veriyi son N günle sınırla (strict join için 90-180 iyi)
+  yfinance:
+    qqq: "QQQ"            # Nasdaq-100 ETF
+    dxy: "DX-Y.NYB"       # Dolar endeksi (Yahoo'da bu sembol genelde çalışıyor)
 
+# ====== SYNC (STRICT 1H INNER-JOIN) ======
 sync:
-  use_sentiment: false   # RSS seyrek; eş-zamanlı kesişimi daraltmasın
+  use_sentiment: false    # true yaparsan sentiment.csv 1h'e ortalanıp dahil edilir
+  mode: "strict_1h_inner" # tüm seriler 1h’e indirgenir ve kesişim alınır
 
+# ====== FEATURES ======
 features:
   rsi_period: 14
   sma_fast: 20
   sma_slow: 50
-  corr_window: 72        # BTC-QQQ korelasyonu için pencere (saat)
+  corr_window: 36         # QQQ korelasyonu için rolling pencere (daha çevik)
+  atr_period: 14          # ATR hesaplaması (kod varsayılanı 14 — burada da dursun)
 
+# ====== RULES (LONG & SHORT DESTEKLİ) ======
+# rule_signal her bar için hem long hem short puanlayıp güçlü tarafı seçer.
 rules:
-  rsi_buy: 45
-  rsi_sell: 65
-  sentiment_min: 0.0     # sentiment kapalı ise etkisiz
-  atr_min_pct: 0.0010    # eş-zamanlı pencerede minimum volatilite eşiği
-  require_qqq_up: true   # QQQ trend yukarı değilse filtrele
-  min_corr_qqq: 0.00     # negatif korelasyon saatlerini ele
+  # Momentum tetikleri
+  rsi_buy: 52             # long için RSI eşiği
+  rsi_sell: 48            # short için RSI eşiği
 
+  # QQQ koşulları (opsiyonel katılık)
+  require_qqq_up: false
+  require_qqq_down: false
+
+  # Korelasyon & volatilite eşikleri
+  min_corr_qqq: -1.0      # çok gevşek tutuyoruz; istersen 0.0 yap
+  atr_min_pct: 0.0008     # çok düşük volatilitede sinyali biraz zayıflat
+
+  # Sinyal alım eşiği (iki taraftan da puan düşükse flat kal)
+  min_take_conf: 0.15
+
+# ====== RISK / EXECUTION ======
 risk:
-  max_position_pct: 1.0      # pozisyon tavanı (%100)
-  position_mode: "scaled"     # "scaled" (confidence ile ölçekli) | "full" (tam)
-  target_floor_pct: 0.30      # scaled modda alt sınır (örn %30)
-  min_hold_bars: 4            # US seans bloklarına uygun daha kısa tutuş
-  cooldown_bars: 3
-  rebalance_threshold: 0.20   # hedef farkı >= %20*max_pos ise rebalance
-  exit_confirm_bars: 1
+  position_mode: "scaled"     # confidence → hedef maruziyet
+  target_floor_pct: 0.40      # (event_backtest destekliyorsa) min hedef
+  max_position_pct: 1.0       # üst sınır
+  rebalance_threshold: 0.10   # hedefe yakınsama eşiği (daha küçük = daha sık rebalance)
+  min_hold_bars: 2            # çok hızlı flip’leri azalt
+  cooldown_bars: 1            # çıkış sonrası kısa bekleme
+
+  # Maliyet varsayımları
   taker_fee: 0.0004
   slippage: 0.0005
 
+  # (Destekliyorsa) çıkış teyidi gibi parametreleri de ekleyebilirsin:
+  # exit_confirm_bars: 1
+
+# ====== SENTIMENT (RSS → VADER) ======
+sentiment:
+  rss_feeds:
+    - "https://www.coindesk.com/arc/outboundfeeds/rss/"
+    - "https://cointelegraph.com/rss"
+  rolling_hours: 24           # 1h resample öncesi pencereli ortalama
+  threshold_pos: 0.2          # (kullanılmıyor olabilir; referans için)
+  threshold_neg: -0.2
+
+# ====== ML (OPSİYONEL) ======
+# main.py model yolunu zaten ./models/btc_gb.joblib olarak kuruyor; burası sadece bayrak.
+ml:
+  enable: false
+
+# ====== MACRO CALENDAR (OPSİYONEL) ======
 macro:
   use_calendar: false
-  ics_links: []               # istersen ICS adresleri ekleyebilirsin
-  event_buffer_hours: 2
-
-ml:
-  enable: false               # model yoksa false; ekleyince true yap
-  # model_file: "btc_gb.joblib"
+  ics_links: []               # örn: ["https://…/FOMC.ics"]
+  pre_event_hours: 2
+  post_event_minutes: 60
