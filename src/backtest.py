@@ -98,4 +98,5 @@ def event_backtest(
     out["equity"] = equity
     stats = _stats_from_equity(equity)
     stats["num_trades"] = len(trades)
+    print(f"[BT] final_target={target:.2f}  equity_start={equity[0]:.4f}  equity_end={equity[-1]:.4f}  steps={len(equity)}")
     return out, stats, trades

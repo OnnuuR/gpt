@@ -37,22 +37,23 @@ macro:
   ics_links: []
 
 rules:
-  rsi_buy: 30
-  rsi_sell: 70
-  sentiment_min: 0.2
-  exit_sent_thresh: -0.5
-  atr_min_pct: 0.0025
-  require_qqq_up: true
-  min_corr_qqq: 0.05
+  rsi_buy: 45
+  rsi_sell: 65
+  sentiment_min: 0.0
+  atr_min_pct: 0.0015
+  require_qqq_up: false
+  min_corr_qqq: -0.20
 
 risk:
-  taker_fee: 0.0004
-  slippage: 0.0005
-  max_position_pct: 0.5
-  min_hold_bars: 12
-  cooldown_bars: 8
-  rebalance_threshold: 0.5
-  exit_confirm_bars: 2
+  max_position_pct: 0.40
+  min_hold_bars: 8
+  cooldown_bars: 6
+  # Önemli iki ayar ↓
+  rebalance_threshold: 0.25   # 0.75'ten 0.25'e çek → 0.11→0.40 farkı tetikler
+  exit_confirm_bars: 1        # 2 → 1; ardışık -1 şartını gevşet
+
+
+
 
 ml:
   enable: false

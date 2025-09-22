@@ -133,6 +133,22 @@ def run_backtest(cfg, logger):
 
     sigdf = pd.DataFrame(rows).set_index("time")
 
+    # --- Hızlı sağlık kontrolü ---
+    try:
+        sigdf = sigdf.sort_index()
+        cmin, cmax = float(sigdf["close"].min()), float(sigdf["close"].max())
+        npos = int((sigdf["signal"] == 1).sum())
+        nneg = int((sigdf["signal"] == -1).sum())
+        print(f"[CHECK] close min/max: {cmin:.2f} / {cmax:.2f} | signals +1:{npos}  -1:{nneg}")
+        if abs(cmax - cmin) < 1e-6:
+            print("[WARN] close min==max → fiyat oynaksız görünüyor (yanlış format/parse?)")
+    except Exception as e:
+        print(f"[CHECK] Sağlık kontrolü atlandı: {e}")
+
+    sigdf["close"] = pd.to_numeric(sigdf["close"], errors="coerce").ffill().bfill()
+
+
+
     # Olay odaklı backtest
     out, stats, trades = event_backtest(
         sigdf,
@@ -146,17 +162,6 @@ def run_backtest(cfg, logger):
 
     print("Backtest stats:", stats)
 
-    # --- Hızlı sağlık kontrolü ---
-    try:
-        sigdf = sigdf.sort_index()
-        cmin, cmax = float(sigdf["close"].min()), float(sigdf["close"].max())
-        npos = int((sigdf["signal"] == 1).sum())
-        nneg = int((sigdf["signal"] == -1).sum())
-        print(f"[CHECK] close min/max: {cmin:.2f} / {cmax:.2f} | signals +1:{npos}  -1:{nneg}")
-        if abs(cmax - cmin) < 1e-6:
-            print("[WARN] close min==max → fiyat oynaksız görünüyor (yanlış format/parse?)")
-    except Exception as e:
-        print(f"[CHECK] Sağlık kontrolü atlandı: {e}")
 
 
     # --- İNSANİ ÖZET ---
