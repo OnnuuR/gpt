@@ -1,7 +1,9 @@
 general:
   data_dir: "./data"
   models_dir: "./models"
-  log_level: "INFO"   # <— eklendi (DEBUG/INFO/WARNING/ERROR kabul edilir)
+  state_dir: "./state"   # ← eklendi
+  log_level: "INFO"
+
 
 
 market:

@@ -304,9 +304,18 @@ def main():
     cfg = load_cfg(args.config)
     logger = get_logger(level=cfg.get("general", {}).get("log_level", "INFO"))
 
+    # Varsayılanları güvenle doldur
+    cfg.setdefault("general", {})
+    cfg["general"].setdefault("data_dir", "./data")
+    cfg["general"].setdefault("models_dir", "./models")
+    cfg["general"].setdefault("state_dir", "./state")
+    cfg["general"].setdefault("log_level", "INFO")
+
+    # Dizinleri oluştur
     os.makedirs(cfg["general"]["data_dir"], exist_ok=True)
-    os.makedirs(cfg["general"]["state_dir"], exist_ok=True)
     os.makedirs(cfg["general"]["models_dir"], exist_ok=True)
+    os.makedirs(cfg["general"]["state_dir"], exist_ok=True)
+
 
     if args.cmd == "download":
         download_all(cfg, logger)
