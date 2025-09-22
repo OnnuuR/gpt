@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+data/
+models/
+state/
+*.csv
+*.joblib
