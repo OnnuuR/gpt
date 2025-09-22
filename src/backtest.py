@@ -23,9 +23,13 @@ def event_backtest(
     rebalance_threshold=0.5,
     exit_confirm_bars=2,
 ):
-    close = df["close"].astype(float).to_numpy()
-    sig = df["signal"].astype(int).to_numpy()
-    conf = df["confidence"].astype(float).to_numpy()
+    df = df.sort_index()
+    close = pd.to_numeric(df["close"], errors="coerce").ffill().bfill().to_numpy(dtype=float)
+    sig = pd.to_numeric(df["signal"], errors="coerce").fillna(0).to_numpy(dtype=int)
+    conf = pd.to_numeric(df["confidence"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+
+    if len(close) >= 2 and np.allclose(close, close[0], rtol=0, atol=1e-9):
+        print("[WARN] close serisi sabit görünüyor — PnL üretilmez. Veri kaynağını kontrol edin.")
 
     equity = [1.0]
     target = 0.0
